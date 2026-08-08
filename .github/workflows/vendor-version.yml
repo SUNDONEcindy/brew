@@ -19,11 +19,10 @@ jobs:
     steps:
       - name: Set up Homebrew
         id: set-up-homebrew
-        uses: Homebrew/actions/setup-homebrew@master
+        uses: Homebrew/actions/setup-homebrew@fd832223f9f99ebf0244dd20658680e5d4aca049 # 2026.08.03.2
         with:
           core: false
           cask: false
-          test-bot: false
 
       - name: Install Bundler RubyGems
         run: brew install-bundler-gems --groups=all
@@ -63,7 +62,7 @@ jobs:
               git check-ignore --quiet "${gem_dir}" || exit_code=$?
               if (( exit_code != 0 )); then
                 if (( exit_code == 1 )); then
-                  echo "::error::VENDOR_VERSION needs bumping in utils/gems.rb" >&2
+                  echo "::error::VENDOR_VERSION needs bumping in utils/gem_setup.rb" >&2
                 else
                   echo "::error::git check-ignore failed" >&2
                 fi

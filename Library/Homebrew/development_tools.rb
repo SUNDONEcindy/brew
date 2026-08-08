@@ -28,7 +28,7 @@ class DevelopmentTools
 
     sig { returns(T::Boolean) }
     def installed?
-      locate("clang").present? || locate("gcc").present?
+      !!(locate("clang") || locate("gcc"))
     end
 
     sig { returns(String) }
@@ -57,14 +57,27 @@ class DevelopmentTools
       :clang
     end
 
+    sig { returns(Version) }
+    def ld64_version
+      Version::NULL
+    end
+
+    sig { returns(T.nilable(String)) }
+    def clang_version_output
+      @clang_version_output ||= T.let(
+        if (path = locate("clang"))
+          `#{path} --version`
+        end, T.nilable(String)
+      )
+    end
+
     # Get the Clang version.
     #
     # @api public
     sig { returns(Version) }
     def clang_version
       @clang_version ||= T.let(
-        if (path = locate("clang")) &&
-           (build_version = `#{path} --version`[/(?:clang|LLVM) version (\d+\.\d(?:\.\d)?)/, 1])
+        if (build_version = clang_version_output&.[](/(?:clang|LLVM) version (\d+\.\d(?:\.\d)?)/, 1))
           Version.new(build_version)
         else
           Version::NULL
@@ -78,8 +91,7 @@ class DevelopmentTools
     sig { returns(Version) }
     def clang_build_version
       @clang_build_version ||= T.let(
-        if (path = locate("clang")) &&
-          (build_version = `#{path} --version`[%r{clang(-| version [^ ]+ \(tags/RELEASE_)(\d{2,})}, 2])
+        if (build_version = clang_version_output&.[](%r{clang(-| version [^ ]+ \(tags/RELEASE_)(\d{2,})}, 2))
           Version.new(build_version)
         else
           Version::NULL
@@ -93,12 +105,14 @@ class DevelopmentTools
     sig { returns(Version) }
     def llvm_clang_build_version
       @llvm_clang_build_version ||= T.let(begin
-        path = Formulary.factory("llvm").opt_prefix/"bin/clang"
+        path = Formula["llvm"].opt_prefix/"bin/clang"
         if path.executable? && (build_version = `#{path} --version`[/clang version (\d+\.\d\.\d)/, 1])
           Version.new(build_version)
         else
           Version::NULL
         end
+      rescue FormulaUnavailableError
+        Version::NULL
       end, T.nilable(Version))
     end
 
@@ -109,9 +123,9 @@ class DevelopmentTools
 
     # Get the GCC version.
     #
-    # @api internal
+    # @api public
     sig { params(cc: String).returns(Version) }
-    def gcc_version(cc)
+    def gcc_version(cc = host_gcc_path.to_s)
       (@gcc_version ||= T.let({}, T.nilable(T::Hash[String, Version]))).fetch(cc) do
         path = HOMEBREW_PREFIX/"opt/#{CompilerSelector.preferred_gcc}/bin"/cc
         path = locate(cc) unless path.exist?
@@ -127,6 +141,7 @@ class DevelopmentTools
 
     sig { void }
     def clear_version_cache
+      @clang_version_output = T.let(nil, T.nilable(String))
       @clang_version = @clang_build_version = T.let(nil, T.nilable(Version))
       @gcc_version = T.let({}, T.nilable(T::Hash[String, Version]))
     end
@@ -167,11 +182,6 @@ class DevelopmentTools
     sig { returns(T::Boolean) }
     def curl_substitution_required?
       !curl_handles_most_https_certificates? && !HOMEBREW_BREWED_CURL_PATH.exist?
-    end
-
-    sig { returns(T::Boolean) }
-    def subversion_handles_most_https_certificates?
-      true
     end
 
     sig { returns(T::Hash[String, T.nilable(String)]) }

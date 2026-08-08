@@ -1,4 +1,4 @@
-# typed: true # rubocop:todo Sorbet/StrictSigil
+# typed: strict
 # frozen_string_literal: true
 
 require "cask/artifact/abstract_artifact"
@@ -8,9 +8,14 @@ module Cask
   module Artifact
     # Superclass for all artifacts which have a source and a target location.
     class Relocated < AbstractArtifact
-      def self.from_args(cask, *args)
-        source_string, target_hash = args
-
+      sig {
+        overridable.params(
+          cask:          Cask,
+          source_string: T.any(String, Pathname),
+          target_hash:   T.untyped,
+        ).returns(T.attached_class)
+      }
+      def self.from_args(cask, source_string, target_hash = nil)
         if target_hash
           raise CaskInvalidError, cask unless target_hash.respond_to?(:keys)
 
@@ -22,6 +27,7 @@ module Cask
         new(cask, source_string, **target_hash)
       end
 
+      sig { overridable.params(target: T.any(String, Pathname), base_dir: T.nilable(Pathname)).returns(Pathname) }
       def resolve_target(target, base_dir: config.public_send(self.class.dirmethod))
         target = Pathname(target)
 
@@ -34,29 +40,34 @@ module Cask
       end
 
       sig {
-        params(cask: Cask, source: T.nilable(T.any(String, Pathname)), target_hash: T.any(String, Pathname))
+        params(cask: Cask, source: T.any(String, Pathname), target_hash: T.any(String, Pathname))
           .void
       }
       def initialize(cask, source, **target_hash)
         super
 
         target = target_hash[:target]
-        @source_string = source.to_s
-        @target_string = target.to_s
+        @source = T.let(nil, T.nilable(Pathname))
+        @source_string = T.let(source.to_s, String)
+        @target = T.let(nil, T.nilable(Pathname))
+        @target_string = T.let(target.to_s, String)
       end
 
+      sig { returns(Pathname) }
       def source
         @source ||= begin
           base_path = cask.staged_path
-          base_path = base_path.join(cask.url.only_path) if cask.url&.only_path.present?
+          base_path = base_path.join(T.must(cask.url).only_path) if cask.url&.only_path.present?
           base_path.join(@source_string)
         end
       end
 
+      sig { returns(Pathname) }
       def target
         @target ||= resolve_target(@target_string.presence || source.basename)
       end
 
+      sig { returns(T::Array[T.anything]) }
       def to_a
         [@source_string].tap do |ary|
           ary << { target: @target_string } unless @target_string.empty?
@@ -69,16 +80,12 @@ module Cask
         "#{@source_string}#{target_string}"
       end
 
-      private
-
-      ALT_NAME_ATTRIBUTE = "com.apple.metadata:kMDItemAlternateNames"
-      private_constant :ALT_NAME_ATTRIBUTE
-
       # Try to make the asset searchable under the target name. Spotlight
       # respects this attribute for many filetypes, but ignores it for App
       # bundles. Alfred 2.2 respects it even for App bundles.
-      def add_altname_metadata(file, altname, command: nil)
-        return if altname.to_s.casecmp(file.basename.to_s).zero?
+      sig { params(file: Pathname, altname: Pathname, command: T.class_of(SystemCommand)).returns(T.nilable(SystemCommand::Result)) }
+      def add_altname_metadata(file, altname, command:)
+        return if altname.to_s.casecmp(file.basename.to_s)&.zero?
 
         odebug "Adding #{ALT_NAME_ATTRIBUTE} metadata"
         altnames = command.run("/usr/bin/xattr",
@@ -90,7 +97,7 @@ module Cask
         altnames = "(#{altnames})"
 
         # Some packages are shipped as u=rx (e.g. Bitcoin Core)
-        command.run!("/bin/chmod",
+        command.run!("chmod",
                      args: ["--", "u+rw", file, file.realpath],
                      sudo: !file.writable? || !file.realpath.writable?)
 
@@ -100,9 +107,17 @@ module Cask
                      sudo:         !file.writable?)
       end
 
+      private
+
+      ALT_NAME_ATTRIBUTE = "com.apple.metadata:kMDItemAlternateNames"
+      private_constant :ALT_NAME_ATTRIBUTE
+
+      sig { returns(String) }
       def printable_target
         target.to_s.sub(/^#{Dir.home}(#{File::SEPARATOR}|$)/, "~/")
       end
     end
   end
 end
+
+require "extend/os/cask/artifact/relocated"

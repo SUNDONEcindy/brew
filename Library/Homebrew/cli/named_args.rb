@@ -1,12 +1,16 @@
 # typed: strict
 # frozen_string_literal: true
 
+require "cask/caskroom"
 require "cli/args"
+require "utils"
+require "utils/output"
 
 module Homebrew
   module CLI
     # Helper class for loading formulae/casks from named arguments.
     class NamedArgs < Array
+      include Utils::Output::Mixin
       extend T::Generic
 
       Elem = type_member(:out) { { fixed: String } }
@@ -79,8 +83,7 @@ module Homebrew
           {}, T.nilable(T::Hash[T.nilable(Symbol), T::Array[T.any(Formula, Keg, Cask::Cask)]])
         )
         @to_formulae_and_casks[only] ||= downcased_unique_named.flat_map do |name|
-          options = { warn: }.compact
-          load_formula_or_cask(name, only:, method:, **options)
+          load_formula_or_cask(name, only:, method:, warn:)
         rescue FormulaUnreadableError, FormulaClassUnavailableError,
                TapFormulaUnreadableError, TapFormulaClassUnavailableError,
                Cask::CaskUnreadableError
@@ -139,22 +142,26 @@ module Homebrew
       end
 
       sig {
-        params(only: T.nilable(Symbol), method: T.nilable(Symbol))
-          .returns(T::Array[T.any(Formula, Keg, Cask::Cask, T::Array[Keg], FormulaOrCaskUnavailableError)])
+        params(only: T.nilable(Symbol), method: T.nilable(Symbol), uniq: T::Boolean)
+          .returns(T::Array[T.any(Formula, Keg, Cask::Cask, T::Array[Keg],
+                                  FormulaOrCaskUnavailableError, NoSuchKegError)])
       }
-      def to_formulae_and_casks_and_unavailable(only: parent.only_formula_or_cask, method: nil)
+      def to_formulae_and_casks_and_unavailable(only: parent.only_formula_or_cask, method: nil, uniq: true)
         @to_formulae_casks_unknowns ||= T.let(
           {},
           T.nilable(T::Hash[
-            T.nilable(Symbol),
-            T::Array[T.any(Formula, Keg, Cask::Cask, T::Array[Keg], FormulaOrCaskUnavailableError)],
+            [T.nilable(Symbol), T::Boolean],
+            T::Array[T.any(Formula, Keg, Cask::Cask, T::Array[Keg],
+                           FormulaOrCaskUnavailableError, NoSuchKegError)],
           ]),
         )
-        @to_formulae_casks_unknowns[method] = downcased_unique_named.map do |name|
+        items = downcased_unique_named.map do |name|
           load_formula_or_cask(name, only:, method:)
-        rescue FormulaOrCaskUnavailableError => e
+        rescue FormulaOrCaskUnavailableError, NoSuchKegError => e
           e
-        end.uniq.freeze
+        end
+        items = items.uniq if uniq
+        @to_formulae_casks_unknowns[[method, uniq]] = items.freeze
       end
 
       sig { params(uniq: T::Boolean).returns(T::Array[Formula]) }
@@ -207,13 +214,13 @@ module Homebrew
               if formula_path.exist? ||
                  (!Homebrew::EnvConfig.no_install_from_api? &&
                  !CoreTap.instance.installed? &&
-                 Homebrew::API::Formula.all_formulae.key?(path.basename.to_s))
+                 Homebrew::API.formula_name?(path.basename.to_s))
                 paths << formula_path
               end
               if cask_path.exist? ||
                  (!Homebrew::EnvConfig.no_install_from_api? &&
                  !CoreCaskTap.instance.installed? &&
-                 Homebrew::API::Cask.all_casks.key?(path.basename.to_s))
+                 Homebrew::API.cask_token?(path.basename.to_s))
                 paths << cask_path
               end
 
@@ -274,11 +281,23 @@ module Homebrew
       }
       def to_kegs_to_casks(only: parent.only_formula_or_cask, ignore_unavailable: false, all_kegs: nil)
         method = all_kegs ? :kegs : :default_kegs
-        @to_kegs_to_casks ||= T.let({}, T.nilable(T::Hash[T.nilable(Symbol), [T::Array[Keg], T::Array[Cask::Cask]]]))
-        @to_kegs_to_casks[method] ||=
-          T.cast(to_formulae_and_casks(only:, ignore_unavailable:, method:)
-          .partition { |o| o.is_a?(Keg) }
-          .map(&:freeze).freeze, [T::Array[Keg], T::Array[Cask::Cask]])
+        key = [method, only, ignore_unavailable]
+
+        @to_kegs_to_casks ||= T.let(
+          {},
+          T.nilable(
+            T::Hash[
+              [T.nilable(Symbol), T.nilable(Symbol), T::Boolean],
+              [T::Array[Keg], T::Array[Cask::Cask]],
+            ],
+          ),
+        )
+        @to_kegs_to_casks[key] ||= T.cast(
+          to_formulae_and_casks(only:, ignore_unavailable:, method:)
+            .partition { |o| o.is_a?(Keg) }
+            .map(&:freeze).freeze,
+          [T::Array[Keg], T::Array[Cask::Cask]],
+        )
       end
 
       sig { returns(T::Array[Tap]) }
@@ -298,8 +317,6 @@ module Homebrew
         downcased_unique_named.grep(HOMEBREW_CASK_TAP_CASK_REGEX)
       end
 
-      private
-
       sig { returns(T::Array[String]) }
       def downcased_unique_named
         # Only lowercase names, not paths, bottle filenames or URLs
@@ -312,11 +329,13 @@ module Homebrew
         end.uniq
       end
 
+      private
+
       sig {
-        params(name: String, only: T.nilable(Symbol), method: T.nilable(Symbol), warn: T.nilable(T::Boolean))
+        params(name: String, only: T.nilable(Symbol), method: T.nilable(Symbol), warn: T::Boolean)
           .returns(T.any(Formula, Keg, Cask::Cask, T::Array[Keg]))
       }
-      def load_formula_or_cask(name, only: nil, method: nil, warn: nil)
+      def load_formula_or_cask(name, only: nil, method: nil, warn: false)
         Homebrew.with_no_api_env_if_needed(@without_api) do
           unreadable_error = nil
 
@@ -324,8 +343,7 @@ module Homebrew
             begin
               case method
               when nil, :factory
-                options = { warn:, force_bottle: @force_bottle, flags: @flags }.compact
-                Formulary.factory(name, *@override_spec, **options)
+                Formulary.factory(name, *@override_spec, warn:, force_bottle: @force_bottle, flags: @flags)
               when :resolve
                 resolve_formula(name)
               when :latest_kegs
@@ -363,7 +381,13 @@ module Homebrew
             cask = begin
               config = Cask::Config.from_args(@parent) if @cask_options
               options = { warn: }.compact
-              candidate_cask = Cask::CaskLoader.load(name, config:, **options)
+              untrusted_installed_cask = (load_untrusted_installed_cask(name, config:) if want_keg_like_cask)
+              candidate_cask = untrusted_installed_cask || Cask::CaskLoader.load(name, config:, **options)
+              skip_installed_caskfile_load = if untrusted_installed_cask
+                !untrusted_installed_cask.loaded_from_api?
+              else
+                false
+              end
 
               if unreadable_error
                 onoe <<~EOS
@@ -375,7 +399,7 @@ module Homebrew
 
               # If we're trying to get a keg-like Cask, do our best to use the same cask
               # file that was used for installation, if possible.
-              if want_keg_like_cask &&
+              if want_keg_like_cask && !skip_installed_caskfile_load &&
                  (installed_caskfile = candidate_cask.installed_caskfile) &&
                  installed_caskfile.exist?
                 cask = Cask::CaskLoader.load_from_installed_caskfile(installed_caskfile)
@@ -393,11 +417,17 @@ module Homebrew
               else
                 candidate_cask
               end
+            rescue Homebrew::UntrustedTapError
+              raise unless want_keg_like_cask
+
+              raise unless (untrusted_installed_cask = load_untrusted_installed_cask(name, config:))
+
+              untrusted_installed_cask
             rescue Cask::CaskUnreadableError, Cask::CaskInvalidError => e
               # If we're trying to get a keg-like Cask, do our best to handle it
               # not being readable and return something that can be used.
               if want_keg_like_cask
-                cask_version = Cask::Cask.new(name, config:).installed_version
+                cask_version = Cask::Caskroom.cask_installed_version(name)
                 Cask::Cask.new(name, config:) do
                   version cask_version if cask_version
                 end
@@ -433,19 +463,51 @@ module Homebrew
 
           raise unreadable_error if unreadable_error
 
-          user, repo, short_name = name.downcase.split("/", 3)
-          if repo.present? && short_name.present?
-            tap = Tap.fetch(T.must(user), repo)
-            raise TapFormulaOrCaskUnavailableError.new(tap, short_name)
+          downcased_name = name.downcase
+          if (tap_name = Utils.tap_from_full_name(downcased_name))
+            raise TapFormulaOrCaskUnavailableError.new(Tap.fetch(tap_name),
+                                                       Utils.name_from_full_name(downcased_name))
           end
 
           raise NoSuchKegError, name if resolve_formula(name)
         end
       end
 
+      sig {
+        params(name: String, config: T.nilable(Cask::Config))
+          .returns(T.nilable(Cask::Cask))
+      }
+      def load_untrusted_installed_cask(name, config: nil)
+        return unless Homebrew::EnvConfig.require_tap_trust?
+
+        require "trust"
+
+        requested_tap, token = Tap.with_cask_token(name) || [nil, name]
+        token = ::Utils.name_from_full_name(token)
+        installed_cask = Cask::Cask.new(token, config:)
+        installed_caskfile = installed_cask.installed_caskfile
+        return unless installed_caskfile&.exist?
+
+        installed_tap = installed_cask.tab.tap
+        return unless installed_tap
+        return if requested_tap && requested_tap != installed_tap
+        return if Homebrew::Trust.trusted?(:cask, "#{installed_tap.name}/#{token}")
+
+        if installed_caskfile.extname == ".json"
+          return Cask::CaskLoader.load_from_installed_caskfile(installed_caskfile,
+                                                               config:)
+        end
+
+        return unless (cask_version = Cask::Caskroom.cask_installed_version(token))
+
+        Cask::Cask.new(token, tap: installed_tap, config:) do
+          version cask_version
+        end
+      end
+
       sig { params(name: String).returns(Formula) }
       def resolve_formula(name)
-        Formulary.resolve(name, **{ spec: @override_spec, force_bottle: @force_bottle, flags: @flags }.compact)
+        Formulary.resolve(name, spec: @override_spec, force_bottle: @force_bottle, flags: @flags)
       end
 
       sig { params(name: String).returns([Pathname, T::Array[Keg]]) }
@@ -529,7 +591,7 @@ module Homebrew
       sig {
         params(
           ref: String, loaded_type: String,
-          package: T.any(T::Array[T.any(Formula, Keg)], Cask::Cask, Formula, Keg, NilClass)
+          package: T.nilable(T.any(T::Array[T.any(Formula, Keg)], Cask::Cask, Formula, Keg))
         ).returns(String)
       }
       def package_conflicts_message(ref, loaded_type, package)
@@ -571,6 +633,7 @@ module Homebrew
         end
         return unless available
         return if Context.current.quiet?
+        return if cask&.old_tokens&.include?(ref)
 
         opoo package_conflicts_message(ref, loaded_type, cask)
       end

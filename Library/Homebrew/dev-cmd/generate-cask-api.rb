@@ -21,10 +21,12 @@ module Homebrew
           Generate `homebrew/cask` API data files for <#{HOMEBREW_API_WWW}>.
           The generated files are written to the current directory.
         EOS
-
-        switch "-n", "--dry-run", description: "Generate API data without writing it to files."
+        switch "-n", "--dry-run",
+               description: "Generate API data without writing it to files."
 
         named_args :none
+
+        hide_from_man_page!
       end
 
       sig { override.void }
@@ -33,7 +35,7 @@ module Homebrew
         raise TapUnavailableError, tap.name unless tap.installed?
 
         unless args.dry_run?
-          directories = ["_data/cask", "api/cask", "api/cask-source", "cask", "api/internal/v3"].freeze
+          directories = ["_data/cask", "api/cask", "api/cask-source", "cask", "api/internal"].freeze
           FileUtils.rm_rf directories
           FileUtils.mkdir_p directories
         end
@@ -44,12 +46,14 @@ module Homebrew
 
           Cask::Cask.generating_hash!
 
-          latest_macos = MacOSVersion.new((HOMEBREW_MACOS_NEWEST_UNSUPPORTED.to_i - 1).to_s).to_sym
+          all_casks = {}
+          latest_macos = MacOSVersion.new(HOMEBREW_MACOS_NEWEST_SUPPORTED).to_sym
           Homebrew::SimulateSystem.with(os: latest_macos, arch: :arm) do
             tap.cask_files.each do |path|
               cask = Cask::CaskLoader.load(path)
               name = cask.token
-              json = JSON.pretty_generate(cask.to_hash_with_variations)
+              all_casks[name] = cask.to_hash_with_variations
+              json = JSON.pretty_generate(all_casks[name])
               cask_source = path.read
               html_template_name = html_template(name)
 
@@ -67,6 +71,23 @@ module Homebrew
 
           canonical_json = JSON.pretty_generate(tap.cask_renames)
           File.write("_data/cask_canonical.json", "#{canonical_json}\n") unless args.dry_run?
+
+          OnSystem::VALID_OS_ARCH_TAGS.each do |bottle_tag|
+            casks = all_casks.to_h do |token, hash|
+              hash = Homebrew::API::Cask::CaskStructGenerator.generate_cask_struct_hash(hash, bottle_tag:)
+                                                             .serialize
+              [token, hash]
+            end
+
+            json_contents = {
+              casks:,
+              renames:        tap.cask_renames,
+              tap_git_head:   tap.git_head,
+              tap_migrations: tap.tap_migrations,
+            }
+
+            File.write("api/internal/cask.#{bottle_tag}.json", JSON.generate(json_contents)) unless args.dry_run?
+          end
         end
       end
 

@@ -14,33 +14,33 @@ class TestRunnerFormula
   attr_reader :eval_all
 
   sig { params(formula: Formula, eval_all: T::Boolean).void }
-  def initialize(formula, eval_all: Homebrew::EnvConfig.eval_all?)
+  def initialize(formula, eval_all: false)
     Formulary.enable_factory_cache!
-    @formula = T.let(formula, Formula)
+    @formula = formula
     @name = T.let(formula.name, String)
     @dependent_hash = T.let({}, T::Hash[Symbol, T::Array[TestRunnerFormula]])
-    @eval_all = T.let(eval_all, T::Boolean)
+    @eval_all = eval_all
     freeze
   end
 
   sig { returns(T::Boolean) }
   def macos_only?
-    formula.requirements.any? { |r| r.is_a?(MacOSRequirement) && !r.version_specified? }
+    !linux_compatible?
   end
 
   sig { returns(T::Boolean) }
   def macos_compatible?
-    !linux_only?
+    formula.supports_macos?
   end
 
   sig { returns(T::Boolean) }
   def linux_only?
-    formula.requirements.any?(LinuxRequirement)
+    !macos_compatible?
   end
 
   sig { returns(T::Boolean) }
   def linux_compatible?
-    !macos_only?
+    formula.supports_linux?
   end
 
   sig { returns(T::Boolean) }
@@ -77,8 +77,6 @@ class TestRunnerFormula
     macos_version.public_send(requirement.comparator, requirement.version)
   end
 
-  SIMULATE_SYSTEM_SYMBOLS = T.let({ arm64: :arm, x86_64: :intel }.freeze, T::Hash[Symbol, Symbol])
-
   sig {
     params(
       platform:      Symbol,
@@ -90,22 +88,14 @@ class TestRunnerFormula
     cache_key = :"#{platform}_#{arch}_#{macos_version}"
 
     @dependent_hash[cache_key] ||= begin
-      formula_selector, eval_all_env = if eval_all
-        [:all, "1"]
-      else
-        [:installed, nil]
-      end
+      os = macos_version || platform
+      arch = Homebrew::SimulateSystem.arch_symbols.fetch(arch)
 
-      with_env(HOMEBREW_EVAL_ALL: eval_all_env) do
-        os = macos_version || platform
-        arch = SIMULATE_SYSTEM_SYMBOLS.fetch(arch)
-
-        Homebrew::SimulateSystem.with(os:, arch:) do
-          Formula.public_send(formula_selector)
-                 .select { |candidate_f| candidate_f.deps.map(&:name).include?(name) }
-                 .map { |f| TestRunnerFormula.new(f, eval_all:) }
-                 .freeze
-        end
+      Homebrew::SimulateSystem.with(os:, arch:) do
+        (eval_all ? Formula.all(eval_all: true) : Formula.installed)
+          .select { |candidate_f| candidate_f.deps.map(&:name).include?(name) }
+          .map { |f| TestRunnerFormula.new(f, eval_all:) }
+          .freeze
       end
     end
 

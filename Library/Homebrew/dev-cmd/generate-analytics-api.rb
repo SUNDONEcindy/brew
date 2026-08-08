@@ -11,7 +11,7 @@ module Homebrew
         build-error install install-on-request
         core-build-error core-install core-install-on-request
         cask-install core-cask-install os-version
-        homebrew-devcmdrun-developer homebrew-os-arch-ci
+        homebrew-devcmdrun-developer homebrew-env-config homebrew-os-arch-ci
         homebrew-prefixes homebrew-versions
         brew-command-run brew-command-run-options brew-test-bot-test
       ].freeze
@@ -22,12 +22,13 @@ module Homebrew
 
       cmd_args do
         description <<~EOS
-          Generates analytics API data files for formulae.brew.sh.
-
+          Generates analytics API data files for <#{HOMEBREW_API_WWW}>.
           The generated files are written to the current directory.
         EOS
 
         named_args :none
+
+        hide_from_man_page!
       end
 
       sig { params(category_name: String, data_source: T.nilable(String)).returns(String) }
@@ -77,7 +78,7 @@ module Homebrew
         analytics_data_dir = root_dir/"_data/analytics"
         analytics_api_dir = root_dir/"api/analytics"
 
-        threads = []
+        analytics_output_queue = Queue.new
 
         CATEGORIES.each do |category|
           formula_analytics_args = []
@@ -124,15 +125,40 @@ module Homebrew
           DAYS.each do |days|
             next if days != "30" && category_name == "build-error" && !data_source.nil?
 
-            threads << Thread.new do
-              args = %W[--days-ago=#{days}]
-              (analytics_data_path/"#{days}d.json").write run_formula_analytics(*formula_analytics_args, *args)
-              (analytics_api_path/"#{days}d.json").write analytics_json_template(category_name, data_source:)
-            end
+            analytics_output_queue << {
+              formula_analytics_args: formula_analytics_args.dup,
+              days:                   days,
+              analytics_data_path:    analytics_data_path,
+              analytics_api_path:     analytics_api_path,
+              category_name:          category_name,
+              data_source:            data_source,
+            }
           end
         end
 
-        threads.each(&:join)
+        workers = []
+        4.times do
+          workers << Thread.new do
+            until analytics_output_queue.empty?
+              analytics_output_type = begin
+                analytics_output_queue.pop(true)
+              rescue ThreadError
+                break
+              end
+
+              days = analytics_output_type[:days]
+              args = ["--days-ago=#{days}"]
+
+              (analytics_output_type[:analytics_data_path]/"#{days}d.json").write \
+                run_formula_analytics(*analytics_output_type[:formula_analytics_args], *args)
+
+              data_source = analytics_output_type[:data_source]
+              (analytics_output_type[:analytics_api_path]/"#{days}d.json").write \
+                analytics_json_template(analytics_output_type[:category_name], data_source:)
+            end
+          end
+        end
+        workers.each(&:join)
       end
     end
   end

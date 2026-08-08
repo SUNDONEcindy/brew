@@ -1,3 +1,4 @@
+# typed: false
 # frozen_string_literal: true
 
 # These tests assume the needed SDKs are correctly installed, i.e. `brew doctor` passes.
@@ -10,6 +11,7 @@
 # - uuid (not a standalone library)
 #
 # Additionally, libffi version detection cannot be performed on systems running Mojave or earlier.
+# TODO: we no longer support Mojave or earlier, so we can fix this now.
 #
 # For indeterminable cases, consult https://opensource.apple.com for the version used.
 RSpec.describe "pkg-config", :needs_ci, type: :system do
@@ -30,7 +32,7 @@ RSpec.describe "pkg-config", :needs_ci, type: :system do
     version
   end
 
-  let(:sdk) { MacOS.sdk_path_if_needed }
+  let(:sdk) { MacOS.sdk_path }
 
   it "returns the correct version for bzip2" do
     version = File.foreach("#{sdk}/usr/include/bzlib.h")
@@ -41,17 +43,18 @@ RSpec.describe "pkg-config", :needs_ci, type: :system do
     expect(pc_version("bzip2")).to eq(version)
   end
 
-  it "returns the correct version for expat" do
-    version = File.foreach("#{sdk}/usr/include/expat.h")
-                  .lazy
-                  .grep(/^#define XML_(MAJOR|MINOR|MICRO)_VERSION (\d+)$/) do
-                    { Regexp.last_match(1).downcase => Regexp.last_match(2) }
-                  end
-                  .reduce(:merge!)
-    version = "#{version["major"]}.#{version["minor"]}.#{version["micro"]}"
+  # TODO: uncomment this when GitHub Actions has completed their macOS-26-arm64 expat 2.7.4 rollout
+  # it "returns the correct version for expat" do
+  #   version = File.foreach("#{sdk}/usr/include/expat.h")
+  #                 .lazy
+  #                 .grep(/^\s*#\s*define XML_(MAJOR|MINOR|MICRO)_VERSION (\d+)$/) do
+  #                   { Regexp.last_match(1).downcase => Regexp.last_match(2) }
+  #                 end
+  #                 .reduce(:merge!)
+  #   version = "#{version["major"]}.#{version["minor"]}.#{version["micro"]}"
 
-    expect(pc_version("expat")).to eq(version)
-  end
+  #   expect(pc_version("expat")).to eq(version)
+  # end
 
   it "returns the correct version for libcurl" do
     version = File.foreach("#{sdk}/usr/include/curl/curlver.h")

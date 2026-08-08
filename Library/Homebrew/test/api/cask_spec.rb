@@ -1,3 +1,4 @@
+# typed: true
 # frozen_string_literal: true
 
 require "api"
@@ -54,16 +55,27 @@ RSpec.describe Homebrew::API::Cask do
     end
 
     before do
-      allow_any_instance_of(Homebrew::API::Download).to receive(:fetch)
-      allow_any_instance_of(Homebrew::API::Download).to receive(:symlink_location).and_return(
+      allow(Homebrew::API).to receive(:fetch_json_api_file).and_return([{
+        "formulae"               => {},
+        "casks"                  => {},
+        "formula_aliases"        => {},
+        "formula_renames"        => {},
+        "cask_renames"           => {},
+        "formula_tap_git_head"   => "",
+        "cask_tap_git_head"      => "",
+        "formula_tap_migrations" => {},
+        "cask_tap_migrations"    => {},
+      }, true])
+      allow_any_instance_of(Homebrew::API::SourceDownload).to receive(:fetch)
+      allow_any_instance_of(Homebrew::API::SourceDownload).to receive(:symlink_location).and_return(
         TEST_FIXTURE_DIR/"cask/Casks/everything.rb",
       )
     end
 
     it "specifies the correct URL and sha256" do
-      expect(Homebrew::API::Download).to receive(:new).with(
+      expect(Homebrew::API::SourceDownload).to receive(:new).with(
         "https://raw.githubusercontent.com/Homebrew/homebrew-cask/abcdef1234567890abcdef1234567890abcdef12/Casks/everything.rb",
-        Checksum.new("d8d0d6b2e5ff65388eccb82236fd3aa157b4a29bb043a1f72b97f0e9b70e8320"),
+        Checksum.new("00ae1ae330365f3d6e4387776f67a9c4b096da3d4546bd0827b5dcafa985234e"),
         any_args,
       ).and_call_original
       described_class.source_download(cask)

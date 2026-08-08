@@ -15,6 +15,7 @@ class Version
   # A part of a {Version}.
   class Token
     extend T::Helpers
+
     abstract!
 
     include Comparable
@@ -140,7 +141,7 @@ class Version
   private_constant :NullToken
 
   # Represents the absence of a token.
-  NULL_TOKEN = T.let(NullToken.new.freeze, NullToken)
+  NULL_TOKEN = NullToken.new.freeze
 
   # A token string.
   class StringToken < Token
@@ -387,6 +388,10 @@ class Version
     # e.g. `https://github.com/petdance/ack/tarball/1.93_02`
     UrlParser.new(%r{github\.com/.+/(?:zip|tar)ball/(?:v|\w+-)?((?:\d+[._-])+\d*)$}),
 
+    # GitHub releases
+    # e.g. `https://github.com/foo/bar/releases/download/v1.2/foo-1.2.0.tar.gz`
+    UrlParser.new(%r{github\.com/.+/releases/download/(?:[rvV]_?)?(#{NUMERIC_WITH_DOTS})/}),
+
     # e.g. `https://github.com/erlang/otp/tarball/OTP_R15B01 (erlang style)`
     UrlParser.new(/[_-]([Rr]\d+[AaBb]\d*(?:-\d+)?)/),
 
@@ -632,7 +637,7 @@ class Version
     0
   end
 
-  sig { override.params(other: T.untyped).returns(T::Boolean) }
+  sig { override.params(other: T.anything).returns(T::Boolean) }
   def ==(other)
     # Makes sure that the same instance of Version::NULL
     # will never equal itself; normally Comparable#==
@@ -719,14 +724,19 @@ class Version
     version.to_i
   end
 
+  # The implicit string conversion of this {Version}, for use where
+  # a {String} is expected. Raises {NoMethodError} if this is a {NULL} version.
+  #
   # @api public
   sig { returns(String) }
   def to_str
-    raise NoMethodError, "undefined method `to_str' for #{self.class}:NULL" if null?
+    raise NoMethodError, "undefined method `to_str` for #{self.class}:NULL" if null?
 
     T.must(version).to_str
   end
 
+  # The string representation of this {Version}.
+  #
   # @api public
   sig { returns(String) }
   def to_s = version.to_s
@@ -745,7 +755,7 @@ class Version
   def inspect
     return "#<Version::NULL>" if null?
 
-    super
+    "#<Version #{self}>"
   end
 
   sig { returns(T.self_type) }
@@ -776,6 +786,6 @@ class Version
 
   sig { params(first: Integer, second: Integer).returns(Integer) }
   def max(first, second)
-    (first > second) ? first : second
+    [first, second].max
   end
 end

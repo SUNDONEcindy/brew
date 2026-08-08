@@ -36,7 +36,9 @@ module Homebrew
                description: "Only list formulae and casks that are not currently installed."
         switch "--eval-all",
                description: "Evaluate all available formulae and casks, whether installed or not, to show " \
-                            "their dependents."
+                            "their dependents.",
+               env:         :eval_all,
+               odeprecated: true
         switch "--include-implicit",
                description: "Include formulae that have <formula> as an implicit dependency for " \
                             "downloading and unpacking source files."
@@ -54,7 +56,7 @@ module Homebrew
                description: "Include only casks."
 
         conflicts "--formula", "--cask"
-        conflicts "--installed", "--all"
+        conflicts "--installed", "--eval-all"
         conflicts "--missing", "--installed"
 
         named_args :formula, min: 1
@@ -119,28 +121,24 @@ module Homebrew
 
           deps
         else
-          all = args.eval_all?
+          eval_all = args.eval_all?
+          eval_all ||= Homebrew::EnvConfig.tap_trust_configured?
 
-          if !args.installed? && !(all || Homebrew::EnvConfig.eval_all?)
-            raise UsageError, "`brew uses` needs `--installed` or `--eval-all` passed or `$HOMEBREW_EVAL_ALL` set!"
+          if !args.installed? && !eval_all
+            raise UsageError,
+                  "`brew uses` needs `--installed`, `HOMEBREW_REQUIRE_TAP_TRUST=1` or " \
+                  "`HOMEBREW_NO_REQUIRE_TAP_TRUST=1` set!"
           end
 
           if show_formulae_and_casks || args.formula?
-            deps += args.installed? ? Formula.installed : Formula.all(eval_all: args.eval_all?)
+            deps += args.installed? ? Formula.installed : Formula.all(eval_all:)
           end
           if show_formulae_and_casks || args.cask?
-            deps += args.installed? ? Cask::Caskroom.casks : Cask::Cask.all(eval_all: args.eval_all?)
+            deps += args.installed? ? Cask::Caskroom.casks : Cask::Cask.all(eval_all:)
           end
 
           if args.missing?
-            deps.reject! do |dep|
-              case dep
-              when Formula
-                dep.any_version_installed?
-              when Cask::Cask
-                dep.installed?
-              end
-            end
+            deps.reject!(&:any_version_installed?)
             ignores.delete(:satisfied?)
           end
 

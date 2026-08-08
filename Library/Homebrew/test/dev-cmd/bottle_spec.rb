@@ -1,3 +1,4 @@
+# typed: true
 # frozen_string_literal: true
 
 require "cmd/shared_examples/args_parse"
@@ -5,7 +6,7 @@ require "dev-cmd/bottle"
 
 RSpec.describe Homebrew::DevCmd::Bottle do
   def stub_hash(parameters)
-    <<~EOS
+    <<~JSON
       {
         "#{parameters[:name]}":{
            "formula":{
@@ -22,12 +23,13 @@ RSpec.describe Homebrew::DevCmd::Bottle do
                     "filename":"#{parameters[:filename]}",
                     "local_filename":"#{parameters[:local_filename]}",
                     "sha256":"#{parameters[:sha256]}"
+                    #{",\"sbom\":#{parameters[:sbom].to_json}" if parameters[:sbom]}
                  }
               }
            }
         }
       }
-    EOS
+    JSON
   end
 
   it_behaves_like "parseable arguments"
@@ -134,7 +136,7 @@ RSpec.describe Homebrew::DevCmd::Bottle do
       .and be_a_success
       # rubocop:enable Layout/MultilineMethodCallIndentation
 
-      expect((core_tap.path/"Formula/testball.rb").read).to eq <<~EOS
+      expect((core_tap.path/"Formula/testball.rb").read).to eq <<~RUBY
         class Testball < Formula
           desc "Some test"
           homepage "https://brew.sh/testball"
@@ -163,20 +165,20 @@ RSpec.describe Homebrew::DevCmd::Bottle do
           # something here
 
         end
-      EOS
+      RUBY
     end
 
     it "replaces the bottle block in a formula that already has a bottle block" do
       core_tap.path.cd do
         system "git", "-c", "init.defaultBranch=master", "init"
-        setup_test_formula "testball", bottle_block: <<~EOS
+        setup_test_formula "testball", bottle_block: <<~RUBY
 
           bottle do
             sha256 cellar: :any_skip_relocation, arm64_big_sur: "c3c650d75f5188f5d6edd351dd3215e141b73b8ec1cf9144f30e39cbc45de72e"
             sha256 cellar: :any_skip_relocation, big_sur:       "6b276491297d4052538bd2fd22d5129389f27d90a98f831987236a5b90511b98"
             sha256 cellar: :any_skip_relocation, catalina:      "16cf230afdfcb6306c208d169549cf8773c831c8653d2c852315a048960d7e72"
           end
-        EOS
+        RUBY
         system "git", "add", "--all"
         system "git", "commit", "-m", "testball 0.1"
       end
@@ -204,7 +206,7 @@ RSpec.describe Homebrew::DevCmd::Bottle do
       .and be_a_success
       # rubocop:enable Layout/MultilineMethodCallIndentation
 
-      expect((core_tap.path/"Formula/testball.rb").read).to eq <<~EOS
+      expect((core_tap.path/"Formula/testball.rb").read).to eq <<~RUBY
         class Testball < Formula
           desc "Some test"
           homepage "https://brew.sh/testball"
@@ -233,18 +235,18 @@ RSpec.describe Homebrew::DevCmd::Bottle do
           # something here
 
         end
-      EOS
+      RUBY
     end
 
     it "updates the bottle block in a formula that already has a bottle block when using --keep-old" do
       core_tap.path.cd do
         system "git", "-c", "init.defaultBranch=master", "init"
-        setup_test_formula "testball", bottle_block: <<~EOS
+        setup_test_formula "testball", bottle_block: <<~RUBY
 
           bottle do
-            sha256 cellar: :any, high_sierra: "6971b6eebf4c00eaaed72a1104a49be63861eabc95d679a0c84040398e320059"
+            sha256 cellar: :any, sonoma: "6971b6eebf4c00eaaed72a1104a49be63861eabc95d679a0c84040398e320059"
           end
-        EOS
+        RUBY
         system "git", "add", "--all"
         system "git", "commit", "-m", "testball 0.1"
       end
@@ -263,9 +265,9 @@ RSpec.describe Homebrew::DevCmd::Bottle do
         ==> testball
           bottle do
             sha256 cellar: :any_skip_relocation, arm64_big_sur: "8f9aecd233463da6a4ea55f5f88fc5841718c013f3e2a7941350d6130f1dc149"
+            sha256 cellar: :any,                 sonoma:        "6971b6eebf4c00eaaed72a1104a49be63861eabc95d679a0c84040398e320059"
             sha256 cellar: :any_skip_relocation, big_sur:       "a0af7dcbb5c83f6f3f7ecd507c2d352c1a018f894d51ad241ce8492fa598010f"
             sha256 cellar: :any_skip_relocation, catalina:      "5334dd344986e46b2aa4f0471cac7b0914bd7de7cb890a34415771788d03f2ac"
-            sha256 cellar: :any,                 high_sierra:   "6971b6eebf4c00eaaed72a1104a49be63861eabc95d679a0c84040398e320059"
           end
         \[master [0-9a-f]{4,40}\] testball: update 1\.0 bottle\.
          1 file changed, 4 insertions\(\+\), 1 deletion\(\-\)
@@ -274,7 +276,7 @@ RSpec.describe Homebrew::DevCmd::Bottle do
       .and be_a_success
       # rubocop:enable Layout/MultilineMethodCallIndentation
 
-      expect((core_tap.path/"Formula/testball.rb").read).to eq <<~EOS
+      expect((core_tap.path/"Formula/testball.rb").read).to eq <<~RUBY
         class Testball < Formula
           desc "Some test"
           homepage "https://brew.sh/testball"
@@ -285,9 +287,9 @@ RSpec.describe Homebrew::DevCmd::Bottle do
 
           bottle do
             sha256 cellar: :any_skip_relocation, arm64_big_sur: "8f9aecd233463da6a4ea55f5f88fc5841718c013f3e2a7941350d6130f1dc149"
+            sha256 cellar: :any,                 sonoma:        "6971b6eebf4c00eaaed72a1104a49be63861eabc95d679a0c84040398e320059"
             sha256 cellar: :any_skip_relocation, big_sur:       "a0af7dcbb5c83f6f3f7ecd507c2d352c1a018f894d51ad241ce8492fa598010f"
             sha256 cellar: :any_skip_relocation, catalina:      "5334dd344986e46b2aa4f0471cac7b0914bd7de7cb890a34415771788d03f2ac"
-            sha256 cellar: :any,                 high_sierra:   "6971b6eebf4c00eaaed72a1104a49be63861eabc95d679a0c84040398e320059"
           end
 
           def install
@@ -304,7 +306,89 @@ RSpec.describe Homebrew::DevCmd::Bottle do
           # something here
 
         end
-      EOS
+      RUBY
+    end
+
+    it "writes an all bottle JSON for matching platform bottles" do
+      core_tap.path.cd do
+        system "git", "-c", "init.defaultBranch=master", "init"
+        setup_test_formula "testball"
+        system "git", "add", "--all"
+        system "git", "commit", "-m", "testball 0.1"
+      end
+
+      mktmpdir.cd do
+        sha256 = "8f9aecd233463da6a4ea55f5f88fc5841718c013f3e2a7941350d6130f1dc149"
+        bottle_json_paths = ["arm64_big_sur", "big_sur"].map do |tag|
+          Pathname("testball--1.0.#{tag}.bottle.tar.gz").write("test")
+          Pathname("#{TEST_TMPDIR}/testball-1.0.#{tag}.bottle.json").tap do |path|
+            path.write stub_hash(
+              name:           "testball",
+              version:        "1.0",
+              path:           "#{core_tap.path}/Formula/testball.rb",
+              cellar:         "any_skip_relocation",
+              os:             tag,
+              filename:       "testball-1.0.#{tag}.bottle.tar.gz",
+              local_filename: "testball--1.0.#{tag}.bottle.tar.gz",
+              sha256:,
+              sbom:           { "packages" => [{ "SPDXID" => "SPDXRef-#{tag}" }] },
+            )
+          end
+        end
+
+        # RuboCop would align the `.and` with `.to_stdout` which is too floaty.
+        # rubocop:disable Layout/MultilineMethodCallIndentation
+        expect do
+          brew "bottle", "--merge", "--write", "--no-commit", *bottle_json_paths
+        end.to output(/sha256 cellar: :any_skip_relocation, all: "#{sha256}"/).to_stdout
+        .and not_to_output.to_stderr
+        .and be_a_success
+        # rubocop:enable Layout/MultilineMethodCallIndentation
+
+        all_bottle_hash = JSON.parse(Pathname("testball--1.0.all.bottle.json").read)
+        all_bottle_tag_hash = all_bottle_hash.dig("testball", "bottle", "tags", "all")
+
+        expect(all_bottle_hash.dig("testball", "bottle", "cellar")).to eq("any_skip_relocation")
+        expect(all_bottle_hash.dig("testball", "bottle", "tags").keys).to eq(["all"])
+        expect(all_bottle_tag_hash).to include(
+          "filename"       => "testball-1.0.all.bottle.tar.gz",
+          "local_filename" => "testball--1.0.all.bottle.tar.gz",
+          "sha256"         => sha256,
+        )
+        expect(all_bottle_tag_hash.dig("sbom", "tags").keys).to contain_exactly("arm64_big_sur", "big_sur")
+        expect(all_bottle_tag_hash).not_to have_key("cellar")
+        expect(Pathname("testball--1.0.all.bottle.tar.gz")).to exist
+      end
+    end
+
+    it "merges when an all bottle cannot be created" do
+      core_tap.path.cd do
+        system "git", "-c", "init.defaultBranch=master", "init"
+        setup_test_formula "testball", bottle_block: <<~RUBY
+
+          bottle do
+            sha256 cellar: :any_skip_relocation, all: "d7b9f4e8bf83608b71fe958a99f19f2e5e68bb2582965d32e41759c24f1aef97"
+          end
+        RUBY
+        system "git", "add", "--all"
+        system "git", "commit", "-m", "testball 0.1"
+      end
+
+      expect do
+        brew "bottle",
+             "--merge",
+             "--write",
+             "--no-commit",
+             "#{TEST_TMPDIR}/testball-1.0.arm64_big_sur.bottle.json",
+             "#{TEST_TMPDIR}/testball-1.0.big_sur.bottle.json",
+             { "GITHUB_EVENT_PATH" => nil }
+      end.to output(/sha256 cellar: :any_skip_relocation, arm64_big_sur:/).to_stdout
+                                                                          .and not_to_output.to_stderr
+                                                                                            .and be_a_success
+
+      formula_contents = (core_tap.path/"Formula/testball.rb").read
+      expect(formula_contents).to include("big_sur:")
+      expect(formula_contents).not_to include("all:")
     end
   end
 
@@ -414,8 +498,8 @@ RSpec.describe Homebrew::DevCmd::Bottle do
       end
 
       # TODO: add deduplication tests e.g.
-      # it "deduplicates JSON files with matching macOS checksums"
-      # it "deduplicates JSON files with matching OS checksums" do
+      #       it "deduplicates JSON files with matching macOS checksums"
+      #       it "deduplicates JSON files with matching OS checksums" do
     end
 
     describe "#merge_bottle_spec" do
@@ -448,15 +532,15 @@ RSpec.describe Homebrew::DevCmd::Bottle do
 
       it "checks for conflicting checksums" do
         old_spec = BottleSpecification.new
-        old_catalina_sha256 = "109c0cb581a7b5d84da36d84b221fb9dd0f8a927b3044d82611791c9907e202e"
-        old_spec.sha256(catalina: old_catalina_sha256)
-        old_spec.sha256(mojave: "7571772bf7a0c9fe193e70e521318b53993bee6f351976c9b6e01e00d13d6c3f")
-        new_catalina_sha256 = "ec6d7f08412468f28dee2be17ad8cd8b883b16b34329efcecce019b8c9736428"
-        new_hash = { "tags" => { "catalina" => { "sha256" => new_catalina_sha256 } } }
-        expected_checksum_hash = { mojave: "7571772bf7a0c9fe193e70e521318b53993bee6f351976c9b6e01e00d13d6c3f" }
+        old_sequoia_sha256 = "109c0cb581a7b5d84da36d84b221fb9dd0f8a927b3044d82611791c9907e202e"
+        old_spec.sha256(sequoia: old_sequoia_sha256)
+        old_spec.sha256(sonoma: "7571772bf7a0c9fe193e70e521318b53993bee6f351976c9b6e01e00d13d6c3f")
+        new_sequoia_sha256 = "ec6d7f08412468f28dee2be17ad8cd8b883b16b34329efcecce019b8c9736428"
+        new_hash = { "tags" => { "sequoia" => { "sha256" => new_sequoia_sha256 } } }
+        expected_checksum_hash = { sonoma: "7571772bf7a0c9fe193e70e521318b53993bee6f351976c9b6e01e00d13d6c3f" }
         expected_checksum_hash[:cellar] = Homebrew::DEFAULT_MACOS_CELLAR
         expect(homebrew.merge_bottle_spec([:sha256], old_spec, new_hash)).to eq [
-          ["sha256 catalina: old: #{old_catalina_sha256.inspect}, new: #{new_catalina_sha256.inspect}"],
+          ["sha256 sequoia: old: #{old_sequoia_sha256.inspect}, new: #{new_sequoia_sha256.inspect}"],
           [expected_checksum_hash],
         ]
       end
@@ -464,66 +548,66 @@ RSpec.describe Homebrew::DevCmd::Bottle do
 
     describe "::generate_sha256_line" do
       it "generates a string without cellar" do
-        expect(homebrew.generate_sha256_line(:catalina, "deadbeef", nil, 0, 10)).to eq(
+        expect(homebrew.generate_sha256_line(:sequoia, "deadbeef", nil, 0, 10)).to eq(
           <<~RUBY.chomp,
-            sha256 catalina: "deadbeef"
+            sha256 sequoia:  "deadbeef"
           RUBY
         )
       end
 
       it "generates a string with cellar symbol" do
-        expect(homebrew.generate_sha256_line(:catalina, "deadbeef", :any, 14, 24)).to eq(
+        expect(homebrew.generate_sha256_line(:sequoia, "deadbeef", :any, 14, 24)).to eq(
           <<~RUBY.chomp,
-            sha256 cellar: :any, catalina: "deadbeef"
+            sha256 cellar: :any, sequoia:  "deadbeef"
           RUBY
         )
       end
 
       it "generates a string with default cellar path" do
-        expect(homebrew.generate_sha256_line(:catalina, "deadbeef", Homebrew::DEFAULT_LINUX_CELLAR, 0, 10)).to eq(
+        expect(homebrew.generate_sha256_line(:sequoia, "deadbeef", Homebrew::DEFAULT_LINUX_CELLAR, 0, 10)).to eq(
           <<~RUBY.chomp,
-            sha256 catalina: "deadbeef"
+            sha256 sequoia:  "deadbeef"
           RUBY
         )
       end
 
       it "generates a string with non-default cellar path" do
-        expect(homebrew.generate_sha256_line(:catalina, "deadbeef", "/home/test", 22, 32)).to eq(
+        expect(homebrew.generate_sha256_line(:sequoia, "deadbeef", "/home/test", 22, 32)).to eq(
           <<~RUBY.chomp,
-            sha256 cellar: "/home/test", catalina: "deadbeef"
+            sha256 cellar: "/home/test", sequoia:  "deadbeef"
           RUBY
         )
       end
 
       context "with offsets" do
         it "generates a string without cellar" do
-          expect(homebrew.generate_sha256_line(:catalina, "deadbeef", nil, 0, 15)).to eq(
+          expect(homebrew.generate_sha256_line(:sequoia, "deadbeef", nil, 0, 15)).to eq(
             <<~RUBY.chomp,
-              sha256 catalina:      "deadbeef"
+              sha256 sequoia:       "deadbeef"
             RUBY
           )
         end
 
         it "generates a string with cellar symbol" do
-          expect(homebrew.generate_sha256_line(:catalina, "deadbeef", :any, 20, 35)).to eq(
+          expect(homebrew.generate_sha256_line(:sequoia, "deadbeef", :any, 20, 35)).to eq(
             <<~RUBY.chomp,
-              sha256 cellar: :any,       catalina:      "deadbeef"
+              sha256 cellar: :any,       sequoia:       "deadbeef"
             RUBY
           )
         end
 
         it "generates a string with default cellar path" do
-          expect(homebrew.generate_sha256_line(:catalina, "deadbeef", Homebrew::DEFAULT_LINUX_CELLAR, 14, 30)).to eq(
+          expect(homebrew.generate_sha256_line(:sequoia, "deadbeef", Homebrew::DEFAULT_LINUX_CELLAR, 14, 30)).to eq(
             <<~RUBY.chomp,
-              sha256               catalina:       "deadbeef"
+              sha256               sequoia:        "deadbeef"
             RUBY
           )
         end
 
         it "generates a string with non-default cellar path" do
-          expect(homebrew.generate_sha256_line(:catalina, "deadbeef", "/home/test", 25, 36)).to eq(
+          expect(homebrew.generate_sha256_line(:sequoia, "deadbeef", "/home/test", 25, 36)).to eq(
             <<~RUBY.chomp,
-              sha256 cellar: "/home/test",    catalina:  "deadbeef"
+              sha256 cellar: "/home/test",    sequoia:   "deadbeef"
             RUBY
           )
         end

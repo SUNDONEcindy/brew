@@ -1,3 +1,4 @@
+# typed: true
 # frozen_string_literal: true
 
 require "utils/shared_audits"
@@ -33,6 +34,26 @@ RSpec.describe SharedAudits do
     status = instance_double(Process::Status, success?: success)
     curl_output = instance_double(SystemCommand::Result, stdout:, status:)
     allow(Utils::Curl).to receive(:curl_output).and_return curl_output
+  end
+
+  describe "::homepage_browsed_recently?" do
+    before { allow(Date).to receive(:today).and_return(Date.new(2026, 7, 26)) }
+
+    it "returns true for a date less than a year ago" do
+      expect(described_class.homepage_browsed_recently?(Date.new(2025, 7, 27))).to be(true)
+    end
+
+    it "returns false for a date a year ago" do
+      expect(described_class.homepage_browsed_recently?(Date.new(2025, 7, 26))).to be(false)
+    end
+
+    it "returns false for a future date" do
+      expect(described_class.homepage_browsed_recently?(Date.new(2026, 7, 27))).to be(false)
+    end
+
+    it "returns false without a date" do
+      expect(described_class.homepage_browsed_recently?(nil)).to be(false)
+    end
   end
 
   describe "::eol_data" do
@@ -94,6 +115,23 @@ RSpec.describe SharedAudits do
     it "finds tags in urls with special characters" do
       url = "https://gitlab.com/a.b/c-d_e/-/archive/2.5/c-d_e-2.5.tar.gz"
       expect(described_class.gitlab_tag_from_url(url)).to eq("2.5")
+    end
+  end
+
+  describe "::forgejo_tag_from_url" do
+    it "finds tags in basic urls" do
+      url = "https://codeberg.org/Aviac/codeberg-cli/archive/v0.4.11.tar.gz"
+      expect(described_class.forgejo_tag_from_url(url)).to eq("v0.4.11")
+    end
+
+    it "finds tags in urls with subgroups" do
+      url = "https://codeberg.org/Aviac/codeberg-cli/archive/some/test/1.2.3.tar.gz"
+      expect(described_class.forgejo_tag_from_url(url)).to eq("some/test/1.2.3")
+    end
+
+    it "finds tags in orgs/repos with special characters" do
+      url = "https://codeberg.org/Aviaca-b_cv/codeberg-cli/archive/v0.4.11.tar.gz"
+      expect(described_class.forgejo_tag_from_url(url)).to eq("v0.4.11")
     end
   end
 end

@@ -1,3 +1,4 @@
+# typed: false
 # frozen_string_literal: true
 
 require "rubocops/rubocop-cask"
@@ -16,6 +17,37 @@ RSpec.describe RuboCop::Cop::Cask::StanzaGrouping, :config do
       cask 'foo' do
         version :latest
         sha256 :no_check
+      end
+    CASK
+  end
+
+  it "groups completion generation with artifacts" do
+    expect_no_offenses <<~CASK
+      cask 'foo' do
+        binary 'foo'
+        generate_completions_from_executable 'foo', 'completions'
+
+        zap trash: '~/.foo'
+      end
+    CASK
+  end
+
+  it "requires a group boundary after completion generation" do
+    expect_offense <<~CASK
+      cask 'foo' do
+        binary 'foo'
+        generate_completions_from_executable 'foo', 'completions'
+        zap trash: '~/.foo'
+      ^^^^^^^^^^^^^^^^^^^^^ stanza groups should be separated by a single empty line
+      end
+    CASK
+
+    expect_correction <<~CASK
+      cask 'foo' do
+        binary 'foo'
+        generate_completions_from_executable 'foo', 'completions'
+
+        zap trash: '~/.foo'
       end
     CASK
   end

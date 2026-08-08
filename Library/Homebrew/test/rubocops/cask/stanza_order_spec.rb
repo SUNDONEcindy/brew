@@ -1,8 +1,53 @@
+# typed: false
 # frozen_string_literal: true
 
 require "rubocops/rubocop-cask"
 
 RSpec.describe RuboCop::Cop::Cask::StanzaOrder, :config do
+  it "registers system conditionals after os stanzas" do
+    expect(RuboCop::Cask::Constants::STANZA_GROUPS.take(2)).to eq([
+      [:arch, :on_arch_conditional, :os, :on_system_conditional],
+      [:version, :sha256],
+    ])
+  end
+
+  it "registers every new top-level cask DSL" do
+    expect(RuboCop::Cask::Constants::STANZA_ORDER).to include(
+      :on_macos,
+      :on_linux,
+      :on_system_conditional,
+      :app_image,
+      :generated_script,
+      :command_wrapper,
+      :generate_completions_from_executable,
+      :preflight_steps,
+      :postflight_steps,
+      :uninstall_preflight_steps,
+      :uninstall_postflight_steps,
+    )
+  end
+
+  it "orders system conditionals before version and URL stanzas" do
+    expect_offense <<~CASK
+      cask 'foo' do
+        version :latest
+        ^^^^^^^^^^^^^^^ `version` stanza out of order
+        url 'https://foo.brew.sh/foo.zip'
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `url` stanza out of order
+        artifact = on_system_conditional macos: 'foo.dmg', linux: 'foo.AppImage'
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `on_system_conditional` stanza out of order
+      end
+    CASK
+
+    expect_correction <<~CASK
+      cask 'foo' do
+        artifact = on_system_conditional macos: 'foo.dmg', linux: 'foo.AppImage'
+        version :latest
+        url 'https://foo.brew.sh/foo.zip'
+      end
+    CASK
+  end
+
   it "accepts a sole stanza" do
     expect_no_offenses <<~CASK
       cask 'foo' do
@@ -37,6 +82,94 @@ RSpec.describe RuboCop::Cop::Cask::StanzaOrder, :config do
       cask 'foo' do
         version :latest
         sha256 :no_check
+      end
+    CASK
+  end
+
+  it "orders `app_image` after `app`" do
+    expect_offense <<~CASK
+      cask 'foo' do
+        app_image 'Foo.AppImage'
+        ^^^^^^^^^^^^^^^^^^^^^^^^ `app_image` stanza out of order
+        app 'Foo.app'
+        ^^^^^^^^^^^^^ `app` stanza out of order
+      end
+    CASK
+
+    expect_correction <<~CASK
+      cask 'foo' do
+        app 'Foo.app'
+        app_image 'Foo.AppImage'
+      end
+    CASK
+  end
+
+  it "orders `generated_script` before `installer`" do
+    expect_offense <<~CASK
+      cask 'foo' do
+        installer script: 'installer.sh'
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `installer` stanza out of order
+        generated_script 'installer.sh', content: '#!/bin/sh'
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated_script` stanza out of order
+      end
+    CASK
+
+    expect_correction <<~CASK
+      cask 'foo' do
+        generated_script 'installer.sh', content: '#!/bin/sh'
+        installer script: 'installer.sh'
+      end
+    CASK
+  end
+
+  it "orders `command_wrapper` after `binary`" do
+    expect_offense <<~CASK
+      cask 'foo' do
+        command_wrapper 'foo', executable: 'Foo.app/Contents/MacOS/foo'
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `command_wrapper` stanza out of order
+        binary 'foo'
+        ^^^^^^^^^^^^ `binary` stanza out of order
+      end
+    CASK
+
+    expect_correction <<~CASK
+      cask 'foo' do
+        binary 'foo'
+        command_wrapper 'foo', executable: 'Foo.app/Contents/MacOS/foo'
+      end
+    CASK
+  end
+
+  it "orders legacy flight blocks after matching install step blocks" do
+    expect_offense <<~CASK
+      cask 'foo' do
+        version :latest
+        sha256 :no_check
+
+        postflight do
+        ^^^^^^^^^^^^^ `postflight` stanza out of order
+          next
+        end
+
+        postflight_steps do
+        ^^^^^^^^^^^^^^^^^^^ `postflight_steps` stanza out of order
+          touch "foo"
+        end
+      end
+    CASK
+
+    expect_correction <<~CASK
+      cask 'foo' do
+        version :latest
+        sha256 :no_check
+
+        postflight_steps do
+          touch "foo"
+        end
+
+        postflight do
+          next
+        end
       end
     CASK
   end
@@ -397,17 +530,18 @@ RSpec.describe RuboCop::Cop::Cask::StanzaOrder, :config do
           url "https://foo.brew.sh/foo-ventura.zip"
         end
         on_catalina do
+        ^^^^^^^^^^^^^^ `on_catalina` stanza out of order
           sha256 "def456"
           ^^^^^^^^^^^^^^^ `sha256` stanza out of order
           version "0.7"
           ^^^^^^^^^^^^^ `version` stanza out of order
           url "https://foo.brew.sh/foo-catalina.zip"
         end
-        on_mojave do
-        ^^^^^^^^^^^^ `on_mojave` stanza out of order
+        on_sequoia do
+        ^^^^^^^^^^^^^ `on_sequoia` stanza out of order
           version :latest
           sha256 "ghi789"
-          url "https://foo.brew.sh/foo-mojave.zip"
+          url "https://foo.brew.sh/foo-sequoia.zip"
         end
         on_big_sur do
         ^^^^^^^^^^^^^ `on_big_sur` stanza out of order
@@ -423,11 +557,6 @@ RSpec.describe RuboCop::Cop::Cask::StanzaOrder, :config do
 
     expect_correction <<~CASK
       cask "foo" do
-        on_mojave do
-          version :latest
-          sha256 "ghi789"
-          url "https://foo.brew.sh/foo-mojave.zip"
-        end
         on_catalina do
           version "0.7"
           sha256 "def456"
@@ -443,6 +572,11 @@ RSpec.describe RuboCop::Cop::Cask::StanzaOrder, :config do
           version :latest
           sha256 "abc123"
           url "https://foo.brew.sh/foo-ventura.zip"
+        end
+        on_sequoia do
+          version :latest
+          sha256 "ghi789"
+          url "https://foo.brew.sh/foo-sequoia.zip"
         end
       end
     CASK

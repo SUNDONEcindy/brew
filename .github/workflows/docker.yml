@@ -4,7 +4,7 @@ on:
   pull_request:
   push:
     branches:
-      - master
+      - main
   merge_group:
   release:
     types:
@@ -18,8 +18,8 @@ defaults:
     shell: bash -xeuo pipefail {0}
 
 env:
-  # odeprecated: remove 20.04 image in Homebrew >=4.7
-  VERSIONS: '["20.04", "22.04", "24.04"]'
+  # odeprecated: remove 22.04 image in Homebrew >=6.1
+  VERSIONS: '["22.04", "24.04", "26.04"]'
 
 jobs:
   generate-tags:
@@ -31,21 +31,23 @@ jobs:
       labels: ${{ steps.attributes.outputs.labels }}
       push: ${{ steps.attributes.outputs.push }}
       merge: ${{ steps.attributes.outputs.merge }}
+      core_revision: ${{ steps.attributes.outputs.core_revision }}
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Fetch origin/master from Git
-        run: git fetch origin master
+      - name: Fetch origin/HEAD from Git
+        run: git fetch origin HEAD
 
       - name: Determine build attributes
         id: attributes
         run: |
           date="$(date --rfc-3339=seconds --utc)"
           brew_version="$(git describe --tags --dirty --abbrev=7)"
+          core_revision="$(git ls-remote https://github.com/Homebrew/homebrew-core refs/heads/main | cut -f1)"
 
           DELIMITER="END_LABELS_$(uuidgen)"
           cat <<EOS | tee -a "${GITHUB_OUTPUT}"
@@ -71,26 +73,19 @@ jobs:
               tags+=(
                 "ghcr.io/homebrew/ubuntu${version}:${brew_version}"
                 "ghcr.io/homebrew/ubuntu${version}:latest"
-                "homebrew/ubuntu${version}:${brew_version}"
-                "homebrew/ubuntu${version}:latest"
               )
-              if [[ "${version}" == "22.04" ]]; then
+              if [[ "${version}" == "24.04" ]]; then
                 tags+=(
                   "ghcr.io/homebrew/brew:${brew_version}"
                   "ghcr.io/homebrew/brew:latest"
-                  "homebrew/brew:${brew_version}"
-                  "homebrew/brew:latest"
                 )
               fi
             elif [[ "${GITHUB_EVENT_NAME}" == "push" &&
-                    "${GITHUB_REF}" == "refs/heads/master" &&
-                    "${version}" == "22.04" ]]; then
-              tags+=(
-                "ghcr.io/homebrew/brew:master"
-                "ghcr.io/homebrew/ubuntu${version}:master"
-                "homebrew/brew:master"
-                "homebrew/ubuntu${version}:master"
-              )
+                    ("${GITHUB_REF}" == "refs/heads/main") ]]; then
+              if [[ "${version}" == "24.04" ]]; then
+                tags+=("ghcr.io/homebrew/brew:main")
+              fi
+              tags+=("ghcr.io/homebrew/ubuntu${version}:main")
             fi
 
             if [[ "${#tags[@]}" -ne 0 ]]; then
@@ -106,9 +101,12 @@ jobs:
             fi
           done <<<"$(jq --raw-output '.[]' <<<"${VERSIONS}")"
 
-          # Transform the `matrix` variable into a JSON array.
-          echo "matrix=$(jq --null-input --compact-output '$ARGS.positional' --args "${matrix[@]}")" >>"${GITHUB_OUTPUT}"
-          echo "merge=${merge}" >>"${GITHUB_OUTPUT}"
+          {
+            # Transform the `matrix` variable into a JSON array.
+            echo "matrix=$(jq --null-input --compact-output '$ARGS.positional' --args "${matrix[@]}")"
+            echo "merge=${merge}"
+            echo "core_revision=${core_revision}"
+          } >>"${GITHUB_OUTPUT}"
 
           {
             DELIMITER="END_TAGS_$(uuidgen)"
@@ -146,25 +144,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # odeprecated: remove 20.04 image in Homebrew >=4.7
-        version: ["20.04", "22.04", "24.04"]
+        # odeprecated: remove 22.04 image in Homebrew >=6.1
+        version: ["22.04", "24.04", "26.04"]
         arch: ["x86_64", "arm64"]
-        exclude:
-          # odeprecated: remove 20.04 image in Homebrew >=4.7
-          - version: "20.04"
-            arch: "arm64"
+
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Fetch origin/master from Git
-        run: git fetch origin master
+      - name: Fetch origin/HEAD from Git
+        run: git fetch origin HEAD
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
           cache-binary: false
 
@@ -174,51 +169,44 @@ jobs:
           VERSION: ${{ matrix.version }}
           PUSH: ${{ needs.generate-tags.outputs.push }}
         run: |
-          # odeprecated: remove 20.04 image in Homebrew >=4.7
-          if [[ "${VERSION}" == "20.04" ]]; then
-            echo "The homebrew/ubuntu20.04 image is deprecated and will soon be retired. Use homebrew/ubuntu24.04 or homebrew/brew." > .docker-deprecate
+          # odeprecated: remove 22.04 image in Homebrew >=6.1
+          if [[ "${VERSION}" == "22.04" ]]; then
+            echo "The homebrew/ubuntu22.04 image is deprecated and will be retired in Homebrew 6.1. Use homebrew/brew." > .docker-deprecate
           fi
 
           filter="$(printf '.["%s"]' "${VERSION}")"
           echo "push=$(jq --raw-output "${filter}" <<<"${PUSH}")" >>"${GITHUB_OUTPUT}"
 
       - name: Log in to GitHub Packages (github-actions[bot])
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: github-actions[bot]
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Docker image
-        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           load: true
           tags: brew
-          cache-from: type=registry,ref=ghcr.io/homebrew/ubuntu${{ matrix.version }}:cache
-          build-args: version=${{ matrix.version }}
+          cache-from: type=registry,ref=ghcr.io/homebrew/ubuntu${{ matrix.version }}:cache-${{ matrix.arch }}
+          build-args: |
+            version=${{ matrix.version }}
+            HOMEBREW_CORE_REVISION=${{ needs.generate-tags.outputs.core_revision }}
           labels: ${{ needs.generate-tags.outputs.labels }}
 
       - name: Set environment variables
-        run: |
-          if [[ "${ARCH}" == "arm64" ]]; then
-            echo "HOMEBREW_ARM64_TESTING=1" >> "$GITHUB_ENV"
-          fi
-
-          # odeprecated: remove 20.04 in Homebrew >=4.7
-          if [[ "${VERSION}" == "20.04" ]]; then
-            echo "HOMEBREW_GLIBC_TESTING=1" >> "$GITHUB_ENV"
-          fi
-        env:
-          VERSION: ${{ matrix.version }}
-          ARCH: ${{ matrix.arch }}
+        if: matrix.version == '22.04'
+        # odeprecated: remove 22.04 in Homebrew >=6.1
+        run: echo "HOMEBREW_GLIBC_TESTING=1" >> "$GITHUB_ENV"
 
       - name: Run brew test-bot --only-setup
-        run: docker run --env HOMEBREW_ARM64_TESTING --env HOMEBREW_GLIBC_TESTING --rm brew brew test-bot --only-setup
+        run: docker run --env HOMEBREW_GLIBC_TESTING --rm brew brew test-bot --only-setup
 
       - name: Log in to GitHub Packages (BrewTestBot)
         if: fromJSON(steps.attributes.outputs.push)
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: BrewTestBot
@@ -227,12 +215,14 @@ jobs:
       - name: Deploy the Docker image by digest
         id: digest
         if: fromJSON(steps.attributes.outputs.push)
-        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          cache-from: type=registry,ref=ghcr.io/homebrew/ubuntu${{ matrix.version }}:cache
-          cache-to: type=registry,ref=ghcr.io/homebrew/ubuntu${{ matrix.version }}:cache,mode=max
-          build-args: version=${{ matrix.version }}
+          cache-from: type=registry,ref=ghcr.io/homebrew/ubuntu${{ matrix.version }}:cache-${{ matrix.arch }}
+          cache-to: type=registry,ref=ghcr.io/homebrew/ubuntu${{ matrix.version }}:cache-${{ matrix.arch }},mode=max
+          build-args: |
+            version=${{ matrix.version }}
+            HOMEBREW_CORE_REVISION=${{ needs.generate-tags.outputs.core_revision }}
           labels: ${{ needs.generate-tags.outputs.labels }}
           outputs: type=image,name=ghcr.io/homebrew/ubuntu${{ matrix.version }},name-canonical=true,push=true,push-by-digest=true
 
@@ -248,7 +238,7 @@ jobs:
 
       - name: Upload the Docker image digest
         if: fromJSON(steps.attributes.outputs.push)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: digest-${{ matrix.version }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
@@ -263,25 +253,19 @@ jobs:
         version: ${{ fromJSON(needs.generate-tags.outputs.matrix) }}
     steps:
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
         with:
           cache-binary: false
 
       - name: Download Docker image digests
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: ${{ runner.temp }}/digests
           pattern: digest-${{ matrix.version }}-*
           merge-multiple: true
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
-        with:
-          username: brewtestbot
-          password: ${{ secrets.HOMEBREW_BREW_DOCKER_TOKEN }}
-
       - name: Log in to GitHub Packages (BrewTestBot)
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: BrewTestBot
@@ -300,10 +284,7 @@ jobs:
           done <<<"$(jq --raw-output "${filter}" <<<"${TAGS}")"
 
           image_args=("ghcr.io/homebrew/ubuntu${VERSION}@sha256:$(<"${RUNNER_TEMP}/digests/${VERSION}-x86_64")")
-          # odeprecated: remove 20.04 image in Homebrew >=4.7
-          if [[ "${VERSION}" != 20.04 ]]; then
-            image_args+=("ghcr.io/homebrew/ubuntu${VERSION}@sha256:$(<"${RUNNER_TEMP}/digests/${VERSION}-arm64")")
-          fi
+          image_args+=("ghcr.io/homebrew/ubuntu${VERSION}@sha256:$(<"${RUNNER_TEMP}/digests/${VERSION}-arm64")")
 
           attempts=0
           until docker buildx imagetools create "${tag_args[@]}" "${image_args[@]}"; do

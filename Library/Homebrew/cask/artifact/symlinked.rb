@@ -1,4 +1,4 @@
-# typed: true # rubocop:todo Sorbet/StrictSigil
+# typed: strict
 # frozen_string_literal: true
 
 require "cask/artifact/relocated"
@@ -17,14 +17,29 @@ module Cask
         "#{english_name} #{link_type_english_name}s"
       end
 
-      def install_phase(**options)
-        link(**options)
+      sig {
+        params(
+          force:   T::Boolean,
+          adopt:   T::Boolean,
+          command: T.class_of(SystemCommand),
+          options: T.anything,
+        ).void
+      }
+      def install_phase(force: false, adopt: false, command: SystemCommand, **options)
+        link(force:, adopt:, command:, **options)
       end
 
-      def uninstall_phase(**options)
-        unlink(**options)
+      sig {
+        params(
+          command:  T.class_of(SystemCommand),
+          _options: T.anything,
+        ).void
+      }
+      def uninstall_phase(command: SystemCommand, **_options)
+        unlink(command:)
       end
 
+      sig { returns(String) }
       def summarize_installed
         if target.symlink? && target.exist? && target.readlink.exist?
           "#{printable_target} -> #{target.readlink} (#{target.readlink.abv})"
@@ -41,7 +56,15 @@ module Cask
 
       private
 
-      def link(force: false, adopt: false, command: nil, **_options)
+      sig {
+        overridable.params(
+          force:    T::Boolean,
+          adopt:    T::Boolean,
+          command:  T.class_of(SystemCommand),
+          _options: T.anything,
+        ).void
+      }
+      def link(force: false, adopt: false, command: SystemCommand, **_options)
         unless source.exist?
           raise CaskError,
                 "It seems the #{self.class.link_type_english_name.downcase} " \
@@ -56,6 +79,12 @@ module Cask
              (target.realpath == source.realpath || target.realpath.to_s.start_with?("#{cask.caskroom_path}/"))
             opoo "#{message}; overwriting."
             Utils.gain_permissions_remove(target, command:)
+          elsif target_links_to_source?
+            ohai "#{self.class.english_name} '#{source.basename}' is already linked to '#{target}'"
+            return
+          elsif (formula = conflicting_formula)
+            opoo "#{message} from formula #{formula}; skipping link."
+            return
           else
             raise CaskError, "#{message}."
           end
@@ -65,15 +94,50 @@ module Cask
         create_filesystem_link(command)
       end
 
-      def unlink(command: nil, **)
+      sig { params(command: T.class_of(SystemCommand)).void }
+      def unlink(command: SystemCommand)
         return unless target.symlink?
 
         ohai "Unlinking #{self.class.english_name} '#{target}'"
+
+        if (formula = conflicting_formula)
+          odebug "#{target} is from formula #{formula}; skipping unlink."
+          return
+        end
+
         Utils.gain_permissions_remove(target, command:)
       end
 
       sig { params(command: T.class_of(SystemCommand)).void }
-      def create_filesystem_link(command); end
+      def create_filesystem_link(command)
+        Utils.gain_permissions_mkpath(target.dirname, command:)
+
+        command.run! "/bin/ln", args: ["--no-dereference", "--force", "--symbolic", source, target],
+                                sudo: !target.dirname.writable?
+      end
+
+      sig { returns(T::Boolean) }
+      def target_links_to_source?
+        target.symlink? && target.realpath == source.realpath
+      rescue => e
+        odebug "Error checking whether #{target} links to #{source}: #{e}"
+        false
+      end
+
+      # Check if the target file is a symlink that originates from a formula
+      # with the same name as this cask, indicating a potential conflict
+      sig { returns(T.nilable(String)) }
+      def conflicting_formula
+        if target.symlink? && target.exist? &&
+           (match = target.realpath.to_s.match(%r{^#{HOMEBREW_CELLAR}/(?<formula>[^/]+)/}o))
+          match[:formula]
+        end
+      rescue => e
+        # If we can't determine the realpath or any other error occurs,
+        # don't treat it as a conflicting formula file
+        odebug "Error checking for conflicting formula file: #{e}"
+        nil
+      end
     end
   end
 end

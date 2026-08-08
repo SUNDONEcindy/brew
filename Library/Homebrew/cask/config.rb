@@ -12,9 +12,11 @@ module Cask
   #
   # @api internal
   class Config
+    ConfigHash = T.type_alias { T::Hash[Symbol, T.any(LazyObject, String, Pathname, T::Array[String])] }
     DEFAULT_DIRS = T.let(
       {
         appdir:               "/Applications",
+        appimagedir:          "~/Applications",
         keyboard_layoutdir:   "/Library/Keyboard Layouts",
         colorpickerdir:       "~/Library/ColorPickers",
         prefpanedir:          "~/Library/PreferencePanes",
@@ -33,10 +35,11 @@ module Cask
       T::Hash[Symbol, String],
     )
 
-    sig { returns(T::Hash[Symbol, String]) }
+    # runtime recursive evaluation forces the LazyObject to be evaluated
+    T::Sig::WithoutRuntime.sig { returns(ConfigHash) }
     def self.defaults
       {
-        languages: LazyObject.new { ::OS::Mac.languages },
+        languages: T.let([], T::Array[String]),
       }.merge(DEFAULT_DIRS).freeze
     end
 
@@ -47,6 +50,7 @@ module Cask
       args = T.unsafe(args)
       new(explicit: {
         appdir:               args.appdir,
+        appimagedir:          args.appimagedir,
         keyboard_layoutdir:   args.keyboard_layoutdir,
         colorpickerdir:       args.colorpickerdir,
         prefpanedir:          args.prefpanedir,
@@ -67,35 +71,26 @@ module Cask
 
     sig { params(json: String, ignore_invalid_keys: T::Boolean).returns(T.attached_class) }
     def self.from_json(json, ignore_invalid_keys: false)
-      config = JSON.parse(json)
+      config = JSON.parse(json, symbolize_names: true)
 
       new(
-        default:             config.fetch("default",  {}),
-        env:                 config.fetch("env",      {}),
-        explicit:            config.fetch("explicit", {}),
+        default:             config.fetch(:default,  {}),
+        env:                 config.fetch(:env,      {}),
+        explicit:            config.fetch(:explicit, {}),
         ignore_invalid_keys:,
       )
     end
 
-    sig {
-      params(
-        config: T::Enumerable[
-          [T.any(String, Symbol), T.any(String, Pathname, T::Array[String])],
-        ],
-      ).returns(
-        T::Hash[Symbol, T.any(String, Pathname, T::Array[String])],
-      )
-    }
+    # runtime recursive evaluation forces the LazyObject to be evaluated
+    T::Sig::WithoutRuntime.sig { params(config: ConfigHash).returns(ConfigHash) }
     def self.canonicalize(config)
       config.to_h do |k, v|
-        key = k.to_sym
-
-        if DEFAULT_DIRS.key?(key)
+        if DEFAULT_DIRS.key?(k)
           raise TypeError, "Invalid path for default dir #{k}: #{v.inspect}" if v.is_a?(Array)
 
-          [key, Pathname(v).expand_path]
+          [k, Pathname(v.to_s).expand_path]
         else
-          [key, v]
+          [k, v]
         end
       end
     end
@@ -103,34 +98,37 @@ module Cask
     # Get the explicit configuration.
     #
     # @api internal
-    sig { returns(T::Hash[Symbol, T.any(String, Pathname, T::Array[String])]) }
+    sig { returns(ConfigHash) }
     attr_accessor :explicit
 
     sig {
       params(
-        default:             T.nilable(T::Hash[Symbol, T.any(String, Pathname, T::Array[String])]),
-        env:                 T.nilable(T::Hash[Symbol, T.any(String, Pathname, T::Array[String])]),
-        explicit:            T::Hash[Symbol, T.any(String, Pathname, T::Array[String])],
+        default:             T.nilable(ConfigHash),
+        env:                 T.nilable(ConfigHash),
+        explicit:            ConfigHash,
         ignore_invalid_keys: T::Boolean,
       ).void
     }
     def initialize(default: nil, env: nil, explicit: {}, ignore_invalid_keys: false)
-      if default
-        @default = T.let(
-          self.class.canonicalize(self.class.defaults.merge(default)),
-          T.nilable(T::Hash[Symbol, T.any(String, Pathname, T::Array[String])]),
-        )
-      end
-      if env
-        @env = T.let(
-          self.class.canonicalize(env),
-          T.nilable(T::Hash[Symbol, T.any(String, Pathname, T::Array[String])]),
-        )
-      end
+      # Define all instance variables in a consistent order so every instance
+      # shares one object shape, avoiding Ruby's shape-variation warning.
+      @default = T.let(
+        default ? self.class.canonicalize(self.class.defaults.merge(default)) : nil,
+        T.nilable(ConfigHash),
+      )
+      @env = T.let(
+        env ? self.class.canonicalize(env) : nil,
+        T.nilable(ConfigHash),
+      )
       @explicit = T.let(
         self.class.canonicalize(explicit),
-        T::Hash[Symbol, T.any(String, Pathname, T::Array[String])],
+        ConfigHash,
       )
+      @binarydir = T.let(nil, T.nilable(Pathname))
+      @manpagedir = T.let(nil, T.nilable(Pathname))
+      @bash_completion = T.let(nil, T.nilable(Pathname))
+      @zsh_completion = T.let(nil, T.nilable(Pathname))
+      @fish_completion = T.let(nil, T.nilable(Pathname))
 
       if ignore_invalid_keys
         @env&.delete_if { |key, _| self.class.defaults.keys.exclude?(key) }
@@ -142,18 +140,19 @@ module Cask
       @explicit.assert_valid_keys(*self.class.defaults.keys)
     end
 
-    sig { returns(T::Hash[Symbol, T.any(String, Pathname, T::Array[String])]) }
+    # runtime recursive evaluation forces the LazyObject to be evaluated
+    T::Sig::WithoutRuntime.sig { returns(ConfigHash) }
     def default
       @default ||= self.class.canonicalize(self.class.defaults)
     end
 
-    sig { returns(T::Hash[Symbol, T.any(String, Pathname, T::Array[String])]) }
+    sig { returns(ConfigHash) }
     def env
       @env ||= self.class.canonicalize(
         Homebrew::EnvConfig.cask_opts
           .select { |arg| arg.include?("=") }
           .map { |arg| T.cast(arg.split("=", 2), [String, String]) }
-          .map do |(flag, value)|
+          .to_h do |(flag, value)|
             key = flag.sub(/^--/, "")
             # converts --language flag to :languages config key
             if key == "language"
@@ -161,34 +160,34 @@ module Cask
               value = value.split(",")
             end
 
-            [key, value]
+            [key.to_sym, value]
           end,
       )
     end
 
     sig { returns(Pathname) }
     def binarydir
-      @binarydir ||= T.let(HOMEBREW_PREFIX/"bin", T.nilable(Pathname))
+      @binarydir ||= HOMEBREW_PREFIX/"bin"
     end
 
     sig { returns(Pathname) }
     def manpagedir
-      @manpagedir ||= T.let(HOMEBREW_PREFIX/"share/man", T.nilable(Pathname))
+      @manpagedir ||= HOMEBREW_PREFIX/"share/man"
     end
 
     sig { returns(Pathname) }
     def bash_completion
-      @bash_completion ||= T.let(HOMEBREW_PREFIX/"etc/bash_completion.d", T.nilable(Pathname))
+      @bash_completion ||= HOMEBREW_PREFIX/"etc/bash_completion.d"
     end
 
     sig { returns(Pathname) }
     def zsh_completion
-      @zsh_completion ||= T.let(HOMEBREW_PREFIX/"share/zsh/site-functions", T.nilable(Pathname))
+      @zsh_completion ||= HOMEBREW_PREFIX/"share/zsh/site-functions"
     end
 
     sig { returns(Pathname) }
     def fish_completion
-      @fish_completion ||= T.let(HOMEBREW_PREFIX/"share/fish/vendor_completions.d", T.nilable(Pathname))
+      @fish_completion ||= HOMEBREW_PREFIX/"share/fish/vendor_completions.d"
     end
 
     sig { returns(T::Array[String]) }

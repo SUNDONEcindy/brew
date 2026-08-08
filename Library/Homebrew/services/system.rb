@@ -1,17 +1,27 @@
 # typed: strict
 # frozen_string_literal: true
 
+require "etc"
 require_relative "system/systemctl"
+require "utils/output"
 
 module Homebrew
   module Services
     module System
-      LAUNCHCTL_DOMAIN_ACTION_NOT_SUPPORTED = T.let(125, Integer)
+      extend Utils::Output::Mixin
+
+      LAUNCHCTL_DOMAIN_ACTION_NOT_SUPPORTED = 125
+      MISSING_DAEMON_MANAGER_EXCEPTION_MESSAGE = "`brew services` is supported only on macOS or Linux (with systemd)!"
 
       # Path to launchctl binary.
       sig { returns(T.nilable(Pathname)) }
       def self.launchctl
         @launchctl ||= T.let(which("launchctl"), T.nilable(Pathname))
+      end
+
+      class << self
+        sig { params(launchctl: T.nilable(Pathname)).returns(T.nilable(Pathname)) }
+        attr_writer :launchctl
       end
 
       # Is this a launchctl system
@@ -38,37 +48,44 @@ module Homebrew
         @user ||= T.let(ENV["USER"].presence || Utils.safe_popen_read("/usr/bin/whoami").chomp, T.nilable(String))
       end
 
-      sig { params(pid: T.nilable(Integer)).returns(T.nilable(String)) }
-      def self.user_of_process(pid)
-        if pid.nil? || pid.zero?
-          user
-        else
-          Utils.safe_popen_read("ps", "-o", "user", "-p", pid.to_s).lines.second&.chomp
-        end
+      sig { params(username: String).returns(T::Boolean) }
+      def self.user_exists?(username)
+        # Current user must be present
+        return true if username == user
+
+        # Check other users
+        Etc.getpwnam(username)
+        true
+      rescue ArgumentError
+        false
       end
 
       # Run at boot.
-      sig { returns(T.nilable(Pathname)) }
+      sig { returns(Pathname) }
       def self.boot_path
         if launchctl?
           Pathname.new("/Library/LaunchDaemons")
         elsif systemctl?
           Pathname.new("/usr/lib/systemd/system")
+        else
+          raise UsageError, MISSING_DAEMON_MANAGER_EXCEPTION_MESSAGE
         end
       end
 
       # Run at login.
-      sig { returns(T.nilable(Pathname)) }
+      sig { returns(Pathname) }
       def self.user_path
         if launchctl?
           Pathname.new("#{Dir.home}/Library/LaunchAgents")
         elsif systemctl?
           Pathname.new("#{Dir.home}/.config/systemd/user")
+        else
+          raise UsageError, MISSING_DAEMON_MANAGER_EXCEPTION_MESSAGE
         end
       end
 
       # If root, return `boot_path`, else return `user_path`.
-      sig { returns(T.nilable(Pathname)) }
+      sig { returns(Pathname) }
       def self.path
         root? ? boot_path : user_path
       end
@@ -90,8 +107,8 @@ module Homebrew
               opoo "uid and euid do not match, using user/* instead of gui/* domain!"
             end
             unless Homebrew::EnvConfig.no_env_hints?
-              puts "Hide this warning by setting HOMEBREW_SERVICES_NO_DOMAIN_WARNING."
-              puts "Hide these hints with HOMEBREW_NO_ENV_HINTS (see `man brew`)."
+              $stderr.puts "Hide this warning by setting `HOMEBREW_SERVICES_NO_DOMAIN_WARNING=1`."
+              $stderr.puts "Hide these hints with `HOMEBREW_NO_ENV_HINTS=1` (see `man brew`)."
             end
             @output_warning = T.let(true, T.nilable(TrueClass))
           end

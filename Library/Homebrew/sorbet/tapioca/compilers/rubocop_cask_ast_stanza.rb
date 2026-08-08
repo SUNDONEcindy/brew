@@ -1,16 +1,15 @@
 # typed: strict
 # frozen_string_literal: true
 
-require "method_source"
 require "rubocop"
 require_relative "../../../rubocops"
 
 module Tapioca
   module Compilers
     class Stanza < Tapioca::Dsl::Compiler
-      ConstantType = type_member { { fixed: Module } }
+      ConstantType = type_member { { fixed: T::Module[T.anything] } }
 
-      sig { override.returns(T::Enumerable[Module]) }
+      sig { override.returns(T::Enumerable[T::Module[T.anything]]) }
       def self.gather_constants = [::RuboCop::Cask::AST::Stanza]
 
       sig { override.void }

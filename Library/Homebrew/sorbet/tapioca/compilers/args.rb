@@ -9,7 +9,7 @@ module Tapioca
     class Args < Tapioca::Dsl::Compiler
       GLOBAL_OPTIONS = T.let(
         Homebrew::CLI::Parser.global_options.map do |short_option, long_option, _|
-          [short_option, long_option].map { "#{Homebrew::CLI::Parser.option_to_name(_1)}?" }
+          [short_option, long_option].map { "#{Homebrew::CLI::Parser.option_to_name(it)}?" }
         end.flatten.freeze, T::Array[String]
       )
 
@@ -19,7 +19,7 @@ module Tapioca
       def self.gather_constants
         # require all the commands to ensure the command subclasses are defined
         ["cmd", "dev-cmd"].each do |dir|
-          Dir[File.join(__dir__, "../../../#{dir}", "*.rb")].each { require(_1) }
+          Dir[File.join(__dir__, "../../../#{dir}", "*.rb")].each { require(it) }
         end
         Homebrew::AbstractCommand.subclasses
       end
@@ -64,7 +64,13 @@ module Tapioca
       sig { params(klass: RBI::Scope, parser: Homebrew::CLI::Parser).void }
       def create_args_methods(klass, parser)
         comma_array_methods = comma_arrays(parser)
-        args_table(parser).each do |method_name|
+        args_methods = args_table(parser)
+
+        # `CLI::Parser` adds `subcommand` dynamically during parsing for commands
+        # that define subcommands.
+        args_methods << :subcommand if parser.subcommands.present? && !args_methods.include?(:subcommand)
+
+        args_methods.each do |method_name|
           method_name_str = method_name.to_s
           next if GLOBAL_OPTIONS.include?(method_name_str)
 

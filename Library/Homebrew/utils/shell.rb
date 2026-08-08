@@ -79,7 +79,7 @@ module Utils
     sig { params(variable: String, value: String).returns(T.nilable(String)) }
     def set_variable_in_profile(variable, value)
       case preferred
-      when :bash, :ksh, :sh, :zsh, nil
+      when :bash, :ksh, :mksh, :sh, :zsh, nil
         "echo 'export #{variable}=#{sh_quote(value)}' >> #{profile}"
       when :pwsh
         "$env:#{variable}='#{value}' >> #{profile}"
@@ -134,7 +134,7 @@ module Utils
 
       str = str.dup
       # Anything that isn't a known safe character is padded.
-      str.gsub!(UNSAFE_SHELL_CHAR, "\\\\" + "\\1") # rubocop:disable Style/StringConcatenation
+      str.gsub!(UNSAFE_SHELL_CHAR, '\\\\\\1')
       # Newlines have to be specially quoted in `csh`.
       str.gsub!("\n", "'\\\n'")
       str
@@ -148,19 +148,33 @@ module Utils
 
       str = str.dup
       # Anything that isn't a known safe character is padded.
-      str.gsub!(UNSAFE_SHELL_CHAR, "\\\\" + "\\1") # rubocop:disable Style/StringConcatenation
+      str.gsub!(UNSAFE_SHELL_CHAR, '\\\\\\1')
       str.gsub!("\n", "'\n'")
       str
     end
 
-    sig { params(type: String, preferred_path: String, notice: T.nilable(String)).returns(String) }
-    def shell_with_prompt(type, preferred_path:, notice:)
+    sig { params(type: String, preferred_path: String, notice: T.nilable(String), home: String).returns(String) }
+    def shell_with_prompt(type, preferred_path:, notice:, home: Dir.home)
       preferred = from_path(preferred_path)
+      path = ENV.fetch("PATH")
       subshell = case preferred
       when :zsh
-        "PROMPT='%B%F{green}#{type}%f %F{blue}$%f%b ' RPROMPT='[%B%F{red}%~%f%b]' #{preferred_path} -f"
+        zdotdir = Pathname.new(HOMEBREW_TEMP/"brew-zsh-prompt-#{Process.euid}")
+        zdotdir.mkpath
+        FileUtils.chmod_R(0700, zdotdir)
+        FileUtils.cp(HOMEBREW_LIBRARY_PATH/"utils/zsh/brew-sh-prompt-zshrc.zsh", zdotdir/".zshrc")
+        %w[.zshenv .zcompdump .zsh_history .zsh_sessions].each do |file|
+          FileUtils.ln_sf("#{home}/#{file}", zdotdir/file)
+        end
+        <<~ZSH.strip
+          BREW_PROMPT_PATH="#{path}" BREW_PROMPT_TYPE="#{type}" ZDOTDIR="#{zdotdir}" #{preferred_path}
+        ZSH
+      when :bash
+        <<~BASH.strip
+          BREW_PROMPT_PATH="#{path}" BREW_PROMPT_TYPE="#{type}" #{preferred_path} --rcfile "#{HOMEBREW_LIBRARY_PATH}/utils/bash/brew-sh-prompt-bashrc.bash"
+        BASH
       else
-        "PS1=\"\\[\\033[1;32m\\]brew \\[\\033[1;31m\\]\\w \\[\\033[1;34m\\]$\\[\\033[0m\\] \" #{preferred_path}"
+        "PS1=\"\\[\\033[1;32m\\]#{type} \\[\\033[1;31m\\]\\w \\[\\033[1;34m\\]$\\[\\033[0m\\] \" #{preferred_path}"
       end
 
       puts notice if notice.present?

@@ -1,3 +1,4 @@
+# typed: false
 # frozen_string_literal: true
 
 require "migrator"
@@ -10,17 +11,17 @@ RSpec.describe Migrator do
 
   let(:new_formula) { Testball.new("newname") }
   let(:old_formula) { Testball.new("oldname") }
-
   let(:new_keg_record) { HOMEBREW_CELLAR/"newname/0.1" }
   let(:old_keg_record) { HOMEBREW_CELLAR/"oldname/0.1" }
-
   let(:old_tab) { Tab.empty }
-
   let(:keg) { Keg.new(old_keg_record) }
   let(:old_pin) { HOMEBREW_PINNED_KEGS/"oldname" }
 
   before do |example|
     allow(new_formula).to receive(:oldnames).and_return(["oldname"])
+    allow(Formulary).to receive(:factory).with("homebrew/core/oldname", any_args).and_return(old_formula)
+    allow(Formulary).to receive(:factory).with("oldname", any_args).and_return(old_formula)
+    allow(Formulary).to receive(:factory).with("newname", any_args).and_return(new_formula)
 
     # do not create directories for error tests
     next if example.metadata[:description].start_with?("raises an error")

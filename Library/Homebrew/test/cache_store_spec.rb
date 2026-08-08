@@ -1,3 +1,4 @@
+# typed: true
 # frozen_string_literal: true
 
 require "cache_store"
@@ -92,17 +93,17 @@ RSpec.describe CacheStoreDatabase do
   describe "#write_if_dirty!" do
     context "with an open database" do
       it "does not raise an error when `close` is called on the database" do
-        expect { sample_db.write_if_dirty! }.not_to raise_error(NoMethodError)
+        expect { sample_db.write_if_dirty! }.not_to raise_error
       end
     end
 
     context "without an open database" do
       before do
-        sample_db.instance_variable_set(:@db, nil)
+        sample_db.db = nil
       end
 
       it "does not raise an error when `close` is called on the database" do
-        expect { sample_db.write_if_dirty! }.not_to raise_error(NoMethodError)
+        expect { sample_db.write_if_dirty! }.not_to raise_error
       end
     end
   end

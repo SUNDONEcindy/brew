@@ -4,7 +4,6 @@
 require "formula"
 require "formula_creator"
 require "missing_formula"
-require "utils/pypi"
 require "cask/cask_loader"
 
 module Homebrew
@@ -16,7 +15,7 @@ module Homebrew
           and open it in the editor. Homebrew will attempt to automatically derive the
           formula name and version, but if it fails, you'll have to make your own template.
           The `wget` formula serves as a simple example. For the complete API, see:
-          <https://rubydoc.brew.sh/Formula>
+          <https://docs.brew.sh/rubydoc/Formula>
         EOS
         switch "--autotools",
                description: "Create a basic template for an Autotools-style build."
@@ -125,7 +124,6 @@ module Homebrew
 
         cask_path.atomic_write <<~RUBY
           # Documentation: https://docs.brew.sh/Cask-Cookbook
-          #                https://docs.brew.sh/Adding-Software-to-Homebrew#cask-stanzas
           # PLEASE REMOVE ALL GENERATED COMMENTS BEFORE SUBMITTING YOUR PULL REQUEST!
           cask "#{token}" do
             version "#{version}"
@@ -183,41 +181,42 @@ module Homebrew
           :zig
         end
 
-        fc = FormulaCreator.new(
-          args.set_name,
-          args.set_version,
-          tap:     args.tap,
+        formula_creator = FormulaCreator.new(
           url:     args.named.fetch(0),
+          name:    args.set_name,
+          version: args.set_version,
+          tap:     args.tap,
           mode:,
           license: args.set_license,
           fetch:   !args.no_fetch?,
           head:    args.HEAD?,
         )
-        fc.parse_url
+
         # ask for confirmation if name wasn't passed explicitly
         if args.set_name.blank?
-          print "Formula name [#{fc.name}]: "
-          fc.name = __gets || fc.name
+          print "Formula name [#{formula_creator.name}]: "
+          confirmed_name = __gets
+          formula_creator.name = confirmed_name if confirmed_name.present?
         end
 
-        fc.verify
+        formula_creator.verify_tap_available!
 
         # Check for disallowed formula, or names that shadow aliases,
         # unless --force is specified.
         unless args.force?
-          if (reason = MissingFormula.disallowed_reason(fc.name))
+          if (reason = MissingFormula.disallowed_reason(formula_creator.name))
             odie <<~EOS
-              The formula '#{fc.name}' is not allowed to be created.
+              The formula '#{formula_creator.name}' is not allowed to be created.
               #{reason}
               If you really want to create this formula use `--force`.
             EOS
           end
 
           Homebrew.with_no_api_env do
-            if Formula.aliases.include? fc.name
-              realname = Formulary.canonical_name(fc.name)
+            if Formula.aliases.include?(formula_creator.name)
+              realname = Formulary.canonical_name(formula_creator.name)
               odie <<~EOS
-                The formula '#{realname}' is already aliased to '#{fc.name}'.
+                The formula '#{realname}' is already aliased to '#{formula_creator.name}'.
                 Please check that you are not creating a duplicate.
                 To force creation use `--force`.
               EOS
@@ -225,19 +224,24 @@ module Homebrew
           end
         end
 
-        path = fc.write_formula!
+        path = formula_creator.write_formula!
 
         formula = Homebrew.with_no_api_env do
           CoreTap.instance.clear_cache
-          Formula[fc.name]
+          Formula[formula_creator.name]
         end
-        PyPI.update_python_resources! formula, ignore_non_pypi_packages: true if args.python?
+
+        if args.python?
+          Homebrew.install_bundler_gems!(groups: ["ast"])
+          require "utils/pypi"
+          PyPI.update_python_resources! formula, ignore_non_pypi_packages: true
+        end
 
         puts <<~EOS
           Please audit and test formula before submitting:
-            HOMEBREW_NO_INSTALL_FROM_API=1 brew audit --new #{fc.name}
-            HOMEBREW_NO_INSTALL_FROM_API=1 brew install --build-from-source --verbose --debug #{fc.name}
-            HOMEBREW_NO_INSTALL_FROM_API=1 brew test #{fc.name}
+            HOMEBREW_NO_INSTALL_FROM_API=1 brew audit --new #{formula_creator.name}
+            HOMEBREW_NO_INSTALL_FROM_API=1 brew install --build-from-source --verbose --debug #{formula_creator.name}
+            HOMEBREW_NO_INSTALL_FROM_API=1 brew test #{formula_creator.name}
         EOS
         path
       end

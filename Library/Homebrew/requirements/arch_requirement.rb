@@ -1,23 +1,29 @@
-# typed: true # rubocop:todo Sorbet/StrictSigil
+# typed: strict
 # frozen_string_literal: true
 
 require "requirement"
 
 # A requirement on a specific architecture.
 class ArchRequirement < Requirement
+  Cache = type_template { { fixed: T::Hash[String, T.untyped] } }
+
   fatal true
 
+  @arch = T.let(nil, T.nilable(Symbol))
+
+  sig { returns(T.nilable(Symbol)) }
   attr_reader :arch
 
+  sig { params(tags: T::Array[Symbol]).void }
   def initialize(tags)
-    @arch = tags.shift
+    @arch = T.let(tags.shift, T.nilable(Symbol))
     super
   end
 
   satisfy(build_env: false) do
     case @arch
     when :x86_64 then Hardware::CPU.intel? && Hardware::CPU.is_64_bit?
-    when :arm64 then Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
+    when :arm64 then Hardware::CPU.arm64?
     when :arm, :intel, :ppc then Hardware::CPU.type == @arch
     end
   end

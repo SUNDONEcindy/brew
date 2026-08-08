@@ -4,7 +4,8 @@
 require "context"
 require "erb"
 require "settings"
-require "extend/cachable"
+require "cachable"
+require "utils/output"
 
 module Utils
   # Helper module for fetching and reporting analytics data.
@@ -13,8 +14,14 @@ module Utils
     INFLUX_TOKEN = "iVdsgJ_OjvTYGAA79gOfWlA_fX0QCuj4eYUNdb-qVUTrC3tp3JTWCADVNE9HxV0kp2ZjIK9tuthy_teX4szr9A=="
     INFLUX_HOST = "https://eu-central-1-1.aws.cloud2.influxdata.com"
     INFLUX_ORG = "d81a3e6d582d485f"
+    WSL_SUFFIX = " [WSL]"
+    ENV_CONFIG_COMMANDS = %w[config fetch install reinstall update update-report upgrade].freeze
 
+    extend Utils::Output::Mixin
+    extend T::Generic
     extend Cachable
+
+    Cache = type_template { { fixed: T::Hash[Symbol, T.untyped] } }
 
     class << self
       include Context
@@ -28,7 +35,7 @@ module Utils
         return if not_this_run? || disabled?
 
         # Tags are always implicitly strings and must have low cardinality.
-        tags_string = tags.map { |k, v| "#{k}=#{v}" }
+        tags_string = tags.map { |k, v| "#{k}=#{v.to_s.gsub(/[ ,=]/) { |char| "\\#{char}" }}" }
                           .join(",")
 
         # Fields need explicitly wrapped with quotes and can have high cardinality.
@@ -59,7 +66,7 @@ module Utils
           puts "#{curl} #{args.join(" ")} \"#{url}\""
           puts Utils.popen_read(curl, *args, url)
         else
-          pid = spawn curl, *args, url
+          pid = spawn curl, *args, url, out: File::NULL, err: File::NULL
           Process.detach(pid)
         end
       end
@@ -122,6 +129,16 @@ module Utils
           devcmdrun: Homebrew::EnvConfig.devcmdrun?,
           developer: Homebrew::EnvConfig.developer?,
         }
+        if ENV_CONFIG_COMMANDS.include?(command)
+          variables = Homebrew::EnvConfig::ANALYTICS_VARIABLES
+          env_config = variables.fetch(Random.rand(variables.length))
+          tags[:env_config] = env_config.to_s
+          tags[:env_config_state] = if Homebrew::EnvConfig.user_set_variable?(env_config)
+            Homebrew::EnvConfig.non_default_variable?(env_config) ? "non_default" : "default"
+          else
+            "unset"
+          end
+        end
 
         # Fields can have high cardinality.
         fields = { options: }
@@ -266,8 +283,8 @@ module Utils
 
               table_output(category, days.to_s, results)
             else
-              total_count = results.values.inject("+")
-              analytics << "#{number_readable(total_count)} (#{days} days)"
+              total_count = results.values.sum
+              analytics << "#{Formatter.number_readable(total_count)} (#{days} days)"
             end
           end
 
@@ -311,7 +328,7 @@ module Utils
           )
           next if last_thirty_days_match.blank?
 
-          last_thirty_days_downloads = T.must(last_thirty_days_match.captures.first).tr(",", "")
+          last_thirty_days_downloads = last_thirty_days_match.captures.fetch(0).tr(",", "")
           thirty_day_download_count += if (millions_match = last_thirty_days_downloads.match(/(\d+\.\d+)M/).presence)
             (millions_match.captures.first.to_f * 1_000_000).to_i
           else
@@ -320,7 +337,7 @@ module Utils
         end
 
         ohai "GitHub Packages Downloads"
-        puts "#{number_readable(thirty_day_download_count)} (30 days)"
+        puts "#{Formatter.number_readable(thirty_day_download_count)} (30 days)"
       end
 
       sig { params(formula: Formula, args: Homebrew::Cmd::Info::Args).void }
@@ -329,7 +346,9 @@ module Utils
 
         require "api"
 
-        json = Homebrew::API::Formula.fetch formula.name
+        return unless Homebrew::API.formula_name? formula.name
+
+        json = Homebrew::API::Formula.formula_json formula.name
         return if json.blank? || json["analytics"].blank?
 
         output_analytics(json, args:)
@@ -345,7 +364,9 @@ module Utils
 
         require "api"
 
-        json = Homebrew::API::Cask.fetch cask.token
+        return unless Homebrew::API.cask_token?(cask.token)
+
+        json = Homebrew::API::Cask.cask_json cask.token
         return if json.blank? || json["analytics"].blank?
 
         output_analytics(json, args:)
@@ -354,7 +375,14 @@ module Utils
         nil
       end
 
-      sig { returns(T::Hash[Symbol, String]) }
+      sig { params(value: String, wsl: T::Boolean).returns(String) }
+      def with_wsl_suffix_if_needed(value, wsl: OS.wsl?)
+        return value if !wsl || value.end_with?(WSL_SUFFIX)
+
+        "#{value}#{WSL_SUFFIX}"
+      end
+
+      sig { returns(T::Hash[Symbol, T.any(T::Boolean, String)]) }
       def default_package_tags
         cache[:default_package_tags] ||= begin
           # Only display default prefixes to reduce cardinality and improve privacy
@@ -368,7 +396,7 @@ module Utils
             developer:      Homebrew::EnvConfig.developer?,
             devcmdrun:      Homebrew::EnvConfig.devcmdrun?,
             arch:           HOMEBREW_PHYSICAL_PROCESSOR,
-            os:             HOMEBREW_SYSTEM,
+            os:             with_wsl_suffix_if_needed(HOMEBREW_SYSTEM),
           }
         end
       end
@@ -380,14 +408,14 @@ module Utils
         cache[:default_package_fields] ||= begin
           version = if (match_data = HOMEBREW_VERSION.match(/^[\d.]+/))
             suffix = "-dev" if HOMEBREW_VERSION.include?("-")
-            match_data[0] + suffix.to_s
+            T.must(match_data[0]) + suffix.to_s
           else
             ">=4.1.22"
           end
 
           # Only include OS versions with an actual name.
           os_name_and_version = if (os_version = OS_VERSION.presence) && os_version.downcase.match?(/^[a-z]/)
-            os_version
+            with_wsl_suffix_if_needed(os_version)
           end
 
           {
@@ -405,7 +433,7 @@ module Utils
       }
       def table_output(category, days, results, os_version: false, cask_install: false)
         oh1 "#{category} (#{days} days)"
-        total_count = results.values.inject("+")
+        total_count = results.values.sum
         formatted_total_count = format_count(total_count)
         formatted_total_percent = format_percent(100)
 
@@ -445,7 +473,7 @@ module Utils
           format "%#{index_width}s", index_header
         formatted_name_with_options_header =
           format "%-#{name_with_options_width}s",
-                 name_with_options_header[0..name_with_options_width-1]
+                 name_with_options_header[0..(name_with_options_width-1)]
         formatted_count_header =
           format "%#{count_width}s", count_header
         formatted_percent_header =
@@ -464,7 +492,7 @@ module Utils
           formatted_index = format "%-#{index_width}s", formatted_index
           formatted_name_with_options =
             format "%-#{name_with_options_width}s",
-                   name_with_options[0..name_with_options_width-1]
+                   name_with_options[0..(name_with_options_width-1)]
           formatted_count = format "%#{count_width}s", format_count(count)
           formatted_percent = if total_count.zero?
             format "%#{percent_width}s", format_percent(0)

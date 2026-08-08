@@ -1,16 +1,20 @@
-# typed: true # rubocop:todo Sorbet/StrictSigil
+# typed: strict
 # frozen_string_literal: true
 
 require "abstract_command"
 require "formula"
 require "fetch"
+require "api/cask_download"
+require "api/formula_bottle"
+require "cask/config"
 require "cask/download"
-require "retryable_download"
+require "download_queue"
 
 module Homebrew
   module Cmd
     class FetchCmd < AbstractCommand
       include Fetch
+
       FETCH_MAX_TRIES = 5
 
       cmd_args do
@@ -24,9 +28,11 @@ module Homebrew
         flag   "--arch=",
                description: "Download for the given CPU architecture. " \
                             "(Pass `all` to download for all architectures.)"
+        switch "--all-platforms",
+               description: "Download for every supported operating system and architecture, plus each " \
+                            "language for <cask>s, fetching each distinct URL once."
         flag   "--bottle-tag=",
                description: "Download a bottle for given tag."
-        flag "--concurrency=", description: "Number of concurrent downloads.", hidden: true
         switch "--HEAD",
                description: "Fetch HEAD version instead of stable version."
         switch "-f", "--force",
@@ -47,9 +53,6 @@ module Homebrew
         switch "--force-bottle",
                description: "Download a bottle if it exists for the current or newest version of macOS, " \
                             "even if it would not be used during installation."
-        switch "--[no-]quarantine",
-               description: "Disable/enable quarantining of downloads (default: enabled).",
-               env:         :cask_opts_quarantine
         switch "--formula", "--formulae",
                description: "Treat all named arguments as formulae."
         switch "--cask", "--casks",
@@ -65,56 +68,21 @@ module Homebrew
         conflicts "--formula", "--cask"
         conflicts "--os", "--bottle-tag"
         conflicts "--arch", "--bottle-tag"
+        conflicts "--all-platforms", "--os"
+        conflicts "--all-platforms", "--arch"
+        conflicts "--all-platforms", "--bottle-tag"
 
         named_args [:formula, :cask], min: 1
-      end
-
-      def concurrency
-        @concurrency ||= args.concurrency&.to_i || 1
-      end
-
-      def download_queue
-        @download_queue ||= begin
-          require "download_queue"
-          DownloadQueue.new(concurrency)
-        end
-      end
-
-      class Spinner
-        FRAMES = [
-          "⠋",
-          "⠙",
-          "⠚",
-          "⠞",
-          "⠖",
-          "⠦",
-          "⠴",
-          "⠲",
-          "⠳",
-          "⠓",
-        ].freeze
-
-        sig { void }
-        def initialize
-          @start = Time.now
-          @i = 0
-        end
-
-        sig { returns(String) }
-        def to_s
-          now = Time.now
-          if @start + 0.1 < now
-            @start = now
-            @i = (@i + 1) % FRAMES.count
-          end
-
-          FRAMES.fetch(@i)
-        end
       end
 
       sig { override.void }
       def run
         Formulary.enable_factory_cache!
+
+        if enqueue_api_formula_bottles? || enqueue_api_cask_downloads?
+          download_queue.fetch
+          return
+        end
 
         bucket = if args.deps?
           args.named.to_formulae_and_casks.flat_map do |formula_or_cask|
@@ -136,8 +104,8 @@ module Homebrew
         bucket.each do |formula_or_cask|
           case formula_or_cask
           when Formula
-            formula = T.cast(formula_or_cask, Formula)
-            ref = formula.loaded_from_api? ? formula.full_name : formula.path
+            formula = formula_or_cask
+            ref = formula.reloadable_ref
 
             os_arch_combinations.each do |os, arch|
               SimulateSystem.with(os:, arch:) do
@@ -157,11 +125,7 @@ module Homebrew
                   begin
                     formula.clear_cache if args.force?
 
-                    bottle_tag = if (bottle_tag = args.bottle_tag&.to_sym)
-                      Utils::Bottles::Tag.from_symbol(bottle_tag)
-                    else
-                      Utils::Bottles::Tag.new(system: os, arch:)
-                    end
+                    bottle_tag = Utils::Bottles::Tag.from_arg(args.bottle_tag&.to_sym, os:, arch:)
 
                     bottle = formula.bottle_for_tag(bottle_tag)
 
@@ -171,9 +135,9 @@ module Homebrew
                     end
 
                     if (manifest_resource = bottle.github_packages_manifest_resource)
-                      fetch_downloadable(manifest_resource)
+                      download_queue.enqueue(manifest_resource)
                     end
-                    fetch_downloadable(bottle)
+                    download_queue.enqueue(bottle)
                   rescue Interrupt
                     raise
                   rescue => e
@@ -189,158 +153,211 @@ module Homebrew
 
                 next if fetched_bottle
 
-                fetch_downloadable(formula.resource)
-
-                formula.resources.each do |r|
-                  fetch_downloadable(r)
-                  r.patches.each { |patch| fetch_downloadable(patch.resource) if patch.external? }
+                if (resource = formula.resource)
+                  download_queue.enqueue(resource)
                 end
 
-                formula.patchlist.each { |patch| fetch_downloadable(patch.resource) if patch.external? }
+                formula.enqueue_resources_and_patches(download_queue:)
               end
             end
+          when Cask::Cask
+            cask_downloads(formula_or_cask).each { |download| download_queue.enqueue(download) }
           else
-            cask = formula_or_cask
-            ref = cask.loaded_from_api? ? cask.full_name : cask.sourcefile_path
-
-            os_arch_combinations.each do |os, arch|
-              SimulateSystem.with(os:, arch:) do
-                cask = Cask::CaskLoader.load(ref)
-
-                if cask.url.nil? || cask.sha256.nil?
-                  opoo "Cask #{cask} is not supported on os #{os} and arch #{arch}"
-                  next
-                end
-
-                quarantine = args.quarantine?
-                quarantine = true if quarantine.nil?
-
-                download = Cask::Download.new(cask, quarantine:)
-                fetch_downloadable(download)
-              end
-            end
+            odie "Invalid formula or cask: #{formula_or_cask}"
           end
         end
 
-        if concurrency == 1
-          downloads.each do |downloadable, promise|
-            promise.wait!
-          rescue ChecksumMismatchError => e
-            opoo "#{downloadable.download_type.capitalize} reports different checksum: #{e.expected}"
-            Homebrew.failed = true if downloadable.is_a?(Resource::Patch)
-          end
-        else
-          spinner = Spinner.new
-          remaining_downloads = downloads.dup
-          previous_pending_line_count = 0
-
-          begin
-            $stdout.print Tty.hide_cursor
-            $stdout.flush
-
-            output_message = lambda do |downloadable, future, last|
-              status = case future.state
-              when :fulfilled
-                "#{Tty.green}✔︎#{Tty.reset}"
-              when :rejected
-                "#{Tty.red}✘#{Tty.reset}"
-              when :pending, :processing
-                "#{Tty.blue}#{spinner}#{Tty.reset}"
-              else
-                raise future.state.to_s
-              end
-
-              message = "#{downloadable.download_type.capitalize} #{downloadable.name}"
-              $stdout.print "#{status} #{message}#{"\n" unless last}"
-              $stdout.flush
-
-              if future.rejected?
-                if (e = future.reason).is_a?(ChecksumMismatchError)
-                  opoo "#{downloadable.download_type.capitalize} reports different checksum: #{e.expected}"
-                  Homebrew.failed = true if downloadable.is_a?(Resource::Patch)
-                  next 2
-                else
-                  message = future.reason.to_s
-                  onoe message
-                  Homebrew.failed = true
-                  next message.count("\n")
-                end
-              end
-
-              1
-            end
-
-            until remaining_downloads.empty?
-              begin
-                finished_states = [:fulfilled, :rejected]
-
-                finished_downloads, remaining_downloads = remaining_downloads.partition do |_, future|
-                  finished_states.include?(future.state)
-                end
-
-                finished_downloads.each do |downloadable, future|
-                  previous_pending_line_count -= 1
-                  $stdout.print Tty.clear_to_end
-                  $stdout.flush
-                  output_message.call(downloadable, future, false)
-                end
-
-                previous_pending_line_count = 0
-                max_lines = [concurrency, Tty.height].min
-                remaining_downloads.each_with_index do |(downloadable, future), i|
-                  break if previous_pending_line_count >= max_lines
-
-                  $stdout.print Tty.clear_to_end
-                  $stdout.flush
-                  last = i == max_lines - 1 || i == remaining_downloads.count - 1
-                  previous_pending_line_count += output_message.call(downloadable, future, last)
-                end
-
-                if previous_pending_line_count.positive?
-                  if (previous_pending_line_count - 1).zero?
-                    $stdout.print Tty.move_cursor_beginning
-                  else
-                    $stdout.print Tty.move_cursor_up_beginning(previous_pending_line_count - 1)
-                  end
-                  $stdout.flush
-                end
-
-                sleep 0.05
-              rescue Interrupt
-                remaining_downloads.each do |_, future|
-                  # FIXME: Implement cancellation of running downloads.
-                end
-
-                download_queue.cancel
-
-                if previous_pending_line_count.positive?
-                  $stdout.print Tty.move_cursor_down(previous_pending_line_count - 1)
-                  $stdout.flush
-                end
-
-                raise
-              end
-            end
-          ensure
-            $stdout.print Tty.show_cursor
-            $stdout.flush
-          end
-        end
+        download_queue.fetch
       ensure
         download_queue.shutdown
       end
 
-      private
+      sig { params(cask: Cask::Cask).returns(T::Array[Cask::Download]) }
+      def cask_downloads(cask)
+        ref = cask.reloadable_ref
 
-      def downloads
-        @downloads ||= {}
+        if args.all_platforms? && cask.loaded_from_api?
+          opoo "Cask #{cask} was loaded from the API; cannot fetch all operating system and " \
+               "architecture variants. Set `HOMEBREW_NO_INSTALL_FROM_API=1` to fetch them all."
+        end
+
+        # With `--all-platforms`, a cask without `on_system` blocks resolves
+        # identically everywhere, so one combination covers the whole matrix.
+        cask_combinations = args.os_arch_combinations
+        cask_combinations = cask_combinations.first(1) if args.all_platforms? && !cask.on_system_blocks_exist?
+
+        downloads = T.let([], T::Array[Cask::Download])
+        enqueued_urls = Set.new
+
+        cask_combinations.each do |os, arch|
+          SimulateSystem.with(os:, arch:) do
+            loaded_cask = begin
+              Cask::CaskLoader.load(ref)
+            rescue Cask::CaskInvalidError, Cask::CaskUnreadableError
+              raise unless cask.on_system_blocks_exist?
+            end
+            if loaded_cask.nil? || loaded_cask.depends_on.arch&.none? { |dep_arch| dep_arch[:type] == arch }
+              opoo "Cask #{cask} is not supported on os #{os} and arch #{arch}"
+              next
+            end
+
+            languages = (loaded_cask.languages if args.all_platforms?)
+            languages = [nil] if languages.blank?
+
+            languages.each do |language|
+              localized_cask = loaded_cask
+              if language
+                # Reload per language: `Cask::Download` reads `sha256`/`url`
+                # lazily, so each download needs its own cask instance.
+                localized_cask = Cask::CaskLoader.load(ref)
+                localized_cask.config = localized_cask.config.merge(
+                  Cask::Config.new(explicit: { languages: [language] }),
+                )
+              end
+
+              if localized_cask.url.nil? || localized_cask.sha256.nil?
+                opoo "Cask #{cask} is not supported on os #{os} and arch #{arch}"
+                next
+              end
+
+              next unless enqueued_urls.add?(localized_cask.url.to_s)
+
+              downloads << Cask::Download.new(
+                localized_cask,
+                require_sha: Homebrew::EnvConfig.cask_opts_require_sha?,
+              )
+            end
+          end
+        end
+
+        downloads
       end
 
-      def fetch_downloadable(downloadable)
-        downloads[downloadable] ||= begin
-          tries = args.retry? ? {} : { tries: 1 }
-          download_queue.enqueue(RetryableDownload.new(downloadable, **tries), force: args.force?)
+      private
+
+      sig { returns(T::Boolean) }
+      def enqueue_api_formula_bottles?
+        return false unless api_fetchable?
+        return false if args.only_formula_or_cask == :cask
+        return false if args.deps? || args.HEAD?
+        return false if args.build_from_source? || args.build_bottle?
+        return false if args.bottle_tag.present?
+
+        names = api_fetch_names(
+          regex:   HOMEBREW_DEFAULT_TAP_FORMULA_REGEX,
+          capture: :name,
+          named:   ->(name) { Homebrew::API::Internal.formula_name?(name) },
+          aliases: Homebrew::API::Internal.formula_aliases,
+          renames: Homebrew::API::Internal.formula_renames,
+        )
+        return false if names.nil?
+
+        bottles = T.let([], T::Array[[String, Bottle]])
+        bottle_tag = Utils::Bottles.tag
+        names.each do |name|
+          formula_struct = Homebrew::API::Internal.formula_struct(name)
+          return false if formula_struct.pour_bottle?
+
+          bottle = Homebrew::API::FormulaBottle.bottle(name:, formula_struct:, bottle_tag:)
+          return false if bottle.nil?
+          return false if !args.force_bottle? && !bottle.compatible_locations?
+
+          bottles << [name, bottle]
         end
+
+        puts "Fetching: #{names * ", "}" if names.size > 1
+        bottles.each do |name, bottle|
+          ohai "Fetching #{name} from #{CoreTap.instance}"
+          bottle.clear_cache if args.force?
+
+          if (manifest_resource = bottle.github_packages_manifest_resource)
+            download_queue.enqueue(manifest_resource)
+          end
+          download_queue.enqueue(bottle)
+        end
+        true
+      end
+
+      sig { returns(T::Boolean) }
+      def enqueue_api_cask_downloads?
+        return false unless api_fetchable?
+        return false if args.only_formula_or_cask != :cask
+
+        tokens = api_fetch_names(
+          regex:   HOMEBREW_DEFAULT_TAP_CASK_REGEX,
+          capture: :token,
+          named:   ->(token) { Homebrew::API::Internal.cask_name?(token) },
+          aliases: {},
+          renames: Homebrew::API::Internal.cask_renames,
+        )
+        return false if tokens.nil?
+
+        downloads = T.let([], T::Array[[String, Cask::Download]])
+        tokens.each do |token|
+          download = Homebrew::API::CaskDownload.download(
+            token:,
+            cask_struct: Homebrew::API::Internal.cask_struct(token),
+            require_sha: Homebrew::EnvConfig.cask_opts_require_sha?,
+          )
+          return false if download.nil?
+
+          downloads << [token, download]
+        end
+
+        puts "Fetching: #{tokens * ", "}" if tokens.size > 1
+        downloads.each do |token, download|
+          ohai "Fetching #{token} from #{CoreCaskTap.instance}"
+          download_queue.enqueue(download)
+        end
+        true
+      end
+
+      sig { returns(T::Boolean) }
+      def api_fetchable?
+        return false if Homebrew::EnvConfig.no_install_from_api?
+        return false if args.all_platforms? || args.os.present? || args.arch.present?
+        return false if ENV["HOMEBREW_TEST_GENERIC_OS"].present?
+
+        true
+      end
+
+      sig {
+        params(
+          regex:   Regexp,
+          capture: Symbol,
+          named:   T.proc.params(name: String).returns(T::Boolean),
+          aliases: T::Hash[String, String],
+          renames: T::Hash[String, String],
+        ).returns(T.nilable(T::Array[String]))
+      }
+      def api_fetch_names(regex:, capture:, named:, aliases:, renames:)
+        requested_names = args.named.downcased_unique_named
+        names = T.let(requested_names.filter_map do |requested_name|
+          name = requested_name[regex, capture]
+          next if name.blank?
+
+          name = name.downcase
+          name = aliases.fetch(name, name)
+          name = renames.fetch(name, name)
+          next unless named.call(name)
+
+          name
+        end, T::Array[String])
+        return if names.length != requested_names.length
+
+        names
+      end
+
+      sig { returns(Integer) }
+      def retries
+        @retries ||= T.let(args.retry? ? FETCH_MAX_TRIES : 1, T.nilable(Integer))
+      end
+
+      sig { returns(DownloadQueue) }
+      def download_queue
+        @download_queue ||= T.let(begin
+          DownloadQueue.new(retries:, force: args.force?)
+        end, T.nilable(DownloadQueue))
       end
     end
   end

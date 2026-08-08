@@ -1,10 +1,11 @@
-# typed: true # rubocop:todo Sorbet/StrictSigil
+# typed: strict
 # frozen_string_literal: true
 
 require "autobump_constants"
 require "locale"
-require "lazy_object"
 require "livecheck"
+require "utils/output"
+require "utils/path"
 
 require "cask/artifact"
 require "cask/artifact_set"
@@ -19,6 +20,7 @@ require "cask/dsl/container"
 require "cask/dsl/depends_on"
 require "cask/dsl/postflight"
 require "cask/dsl/preflight"
+require "cask/dsl/rename"
 require "cask/dsl/uninstall_postflight"
 require "cask/dsl/uninstall_preflight"
 require "cask/dsl/version"
@@ -26,20 +28,26 @@ require "cask/dsl/version"
 require "cask/url"
 require "cask/utils"
 
-require "extend/on_system"
+require "on_system"
 
 module Cask
   # Class representing the domain-specific language used for casks.
   class DSL
+    include ::Utils::Output::Mixin
+    include ::Utils::Path
+
     ORDINARY_ARTIFACT_CLASSES = [
       Artifact::Installer,
       Artifact::App,
+      Artifact::AppImage,
       Artifact::Artifact,
       Artifact::AudioUnitPlugin,
       Artifact::Binary,
+      Artifact::CommandWrapper,
       Artifact::Colorpicker,
       Artifact::Dictionary,
       Artifact::Font,
+      Artifact::GeneratedScript,
       Artifact::InputMethod,
       Artifact::InternetPlugin,
       Artifact::KeyboardLayout,
@@ -57,19 +65,29 @@ module Cask
       Artifact::ZshCompletion,
       Artifact::FishCompletion,
       Artifact::BashCompletion,
+      Artifact::GeneratedCompletion,
       Artifact::Uninstall,
       Artifact::Zap,
     ].freeze
 
-    ACTIVATABLE_ARTIFACT_CLASSES = (ORDINARY_ARTIFACT_CLASSES - [Artifact::StageOnly]).freeze
+    ACTIVATABLE_ARTIFACT_CLASSES = T.let(
+      (ORDINARY_ARTIFACT_CLASSES - [Artifact::StageOnly]).freeze,
+      T::Array[T.class_of(Artifact::AbstractArtifact)],
+    )
 
     ARTIFACT_BLOCK_CLASSES = [
       Artifact::PreflightBlock,
       Artifact::PostflightBlock,
     ].freeze
 
-    DSL_METHODS = Set.new([
-      :appcast,
+    INSTALL_STEP_ARTIFACT_CLASSES = [
+      Artifact::PreflightSteps,
+      Artifact::PostflightSteps,
+      Artifact::UninstallPreflightSteps,
+      Artifact::UninstallPostflightSteps,
+    ].freeze
+
+    DSL_METHODS = T.let(Set.new([
       :arch,
       :artifacts,
       :auto_updates,
@@ -79,9 +97,11 @@ module Cask
       :desc,
       :depends_on,
       :homepage,
+      :homepage_browsed,
       :language,
       :name,
       :os,
+      :rename,
       :sha256,
       :staged_path,
       :url,
@@ -93,45 +113,97 @@ module Cask
       :deprecation_reason,
       :deprecation_replacement_cask,
       :deprecation_replacement_formula,
+      :deprecate_args,
       :disable!,
       :disabled?,
       :disable_date,
       :disable_reason,
       :disable_replacement_cask,
       :disable_replacement_formula,
-      :discontinued?, # TODO: remove once discontinued? is removed (4.5.0)
+      :disable_args,
       :livecheck,
       :livecheck_defined?,
-      :livecheckable?, # TODO: remove once `#livecheckable?` is removed
       :no_autobump!,
       :autobump?,
       :no_autobump_message,
       :on_system_blocks_exist?,
+      :on_os_blocks_exist?,
       :on_system_block_min_os,
       :depends_on_set_in_block?,
       *ORDINARY_ARTIFACT_CLASSES.map(&:dsl_key),
       *ACTIVATABLE_ARTIFACT_CLASSES.map(&:dsl_key),
       *ARTIFACT_BLOCK_CLASSES.flat_map { |klass| [klass.dsl_key, klass.uninstall_dsl_key] },
-    ]).freeze
+      *INSTALL_STEP_ARTIFACT_CLASSES.map(&:dsl_key),
+    ]).freeze, T::Set[Symbol])
 
     include OnSystem::MacOSAndLinux
 
-    attr_reader :cask, :token, :no_autobump_message, :artifacts, :deprecation_date, :deprecation_reason,
-                :deprecation_replacement_cask, :deprecation_replacement_formula,
-                :disable_date, :disable_reason, :disable_replacement_cask,
-                :disable_replacement_formula, :on_system_block_min_os
+    sig { returns(Cask) }
+    attr_reader :cask
+
+    sig { returns(String) }
+    attr_reader :token
+
+    sig { returns(T.nilable(T.any(String, Symbol))) }
+    attr_reader :no_autobump_message
+
+    sig { returns(ArtifactSet) }
+    attr_reader :artifacts
+
+    sig { returns(T.nilable(Date)) }
+    attr_reader :deprecation_date
+
+    sig { returns(T.nilable(T.any(String, Symbol))) }
+    attr_reader :deprecation_reason
+
+    sig { returns(T.nilable(String)) }
+    attr_reader :deprecation_replacement_cask
+
+    sig { returns(T.nilable(String)) }
+    attr_reader :deprecation_replacement_formula
+
+    sig { returns(T.nilable(T::Hash[Symbol, T.nilable(T.any(String, Symbol))])) }
+    attr_reader :deprecate_args
+
+    sig { returns(T.nilable(Date)) }
+    attr_reader :disable_date
+
+    sig { returns(T.nilable(T.any(String, Symbol))) }
+    attr_reader :disable_reason
+
+    sig { returns(T.nilable(String)) }
+    attr_reader :disable_replacement_cask
+
+    sig { returns(T.nilable(String)) }
+    attr_reader :disable_replacement_formula
+
+    sig { returns(T.nilable(Date)) }
+    attr_reader :homepage_browsed
+
+    sig { returns(T.nilable(T::Hash[Symbol, T.nilable(T.any(String, Symbol))])) }
+    attr_reader :disable_args
+
+    sig { returns(T.nilable(MacOSVersion)) }
+    attr_reader :on_system_block_min_os
 
     sig { params(cask: Cask).void }
     def initialize(cask)
-      # NOTE: Variables set by `set_unique_stanza` must be initialized to `nil`.
-      @auto_updates = T.let(nil, T.nilable(T::Boolean))
+      # NOTE: `:"@#{stanza}"` variables set by `set_unique_stanza` must be
+      # initialized to `nil`.
       @arch = T.let(nil, T.nilable(String))
+      @arch_set_in_block = T.let(false, T::Boolean)
       @artifacts = T.let(ArtifactSet.new, ArtifactSet)
+      @auto_updates = T.let(nil, T.nilable(T::Boolean))
+      @auto_updates_set_in_block = T.let(false, T::Boolean)
+      @autobump = T.let(true, T::Boolean)
       @called_in_on_system_block = T.let(false, T::Boolean)
-      @cask = T.let(cask, Cask)
+      @called_in_on_os_block = T.let(false, T::Boolean)
+      @cask = cask
       @caveats = T.let(DSL::Caveats.new(cask), DSL::Caveats)
       @conflicts_with = T.let(nil, T.nilable(DSL::ConflictsWith))
+      @conflicts_with_set_in_block = T.let(false, T::Boolean)
       @container = T.let(nil, T.nilable(DSL::Container))
+      @container_set_in_block = T.let(false, T::Boolean)
       @depends_on = T.let(DSL::DependsOn.new, DSL::DependsOn)
       @depends_on_set_in_block = T.let(false, T::Boolean)
       @deprecated = T.let(false, T::Boolean)
@@ -139,28 +211,39 @@ module Cask
       @deprecation_reason = T.let(nil, T.nilable(T.any(String, Symbol)))
       @deprecation_replacement_cask = T.let(nil, T.nilable(String))
       @deprecation_replacement_formula = T.let(nil, T.nilable(String))
+      @deprecate_args = T.let(nil, T.nilable(T::Hash[Symbol, T.nilable(T.any(String, Symbol))]))
       @desc = T.let(nil, T.nilable(String))
+      @desc_set_in_block = T.let(false, T::Boolean)
       @disable_date = T.let(nil, T.nilable(Date))
       @disable_reason = T.let(nil, T.nilable(T.any(String, Symbol)))
       @disable_replacement_cask = T.let(nil, T.nilable(String))
       @disable_replacement_formula = T.let(nil, T.nilable(String))
+      @disable_args = T.let(nil, T.nilable(T::Hash[Symbol, T.nilable(T.any(String, Symbol))]))
       @disabled = T.let(false, T::Boolean)
       @homepage = T.let(nil, T.nilable(String))
+      @homepage_browsed = T.let(nil, T.nilable(Date))
+      @homepage_set_in_block = T.let(false, T::Boolean)
       @language_blocks = T.let({}, T::Hash[T::Array[String], Proc])
       @language_eval = T.let(nil, T.nilable(String))
       @livecheck = T.let(Livecheck.new(cask), Livecheck)
       @livecheck_defined = T.let(false, T::Boolean)
       @name = T.let([], T::Array[String])
-      @autobump = T.let(true, T::Boolean)
       @no_autobump_defined = T.let(false, T::Boolean)
+      @no_autobump_message = T.let(nil, T.nilable(T.any(String, Symbol)))
       @on_system_blocks_exist = T.let(false, T::Boolean)
-      @os = T.let(nil, T.nilable(String))
+      @on_os_blocks_exist = T.let(false, T::Boolean)
       @on_system_block_min_os = T.let(nil, T.nilable(MacOSVersion))
+      @os = T.let(nil, T.nilable(String))
+      @os_set_in_block = T.let(false, T::Boolean)
+      @rename = T.let([], T::Array[DSL::Rename])
       @sha256 = T.let(nil, T.nilable(T.any(Checksum, Symbol)))
+      @sha256_set_in_block = T.let(false, T::Boolean)
       @staged_path = T.let(nil, T.nilable(Pathname))
       @token = T.let(cask.token, String)
       @url = T.let(nil, T.nilable(URL))
+      @url_set_in_block = T.let(false, T::Boolean)
       @version = T.let(nil, T.nilable(DSL::Version))
+      @version_set_in_block = T.let(false, T::Boolean)
     end
 
     sig { returns(T::Boolean) }
@@ -178,6 +261,9 @@ module Cask
     sig { returns(T::Boolean) }
     def on_system_blocks_exist? = @on_system_blocks_exist
 
+    sig { returns(T::Boolean) }
+    def on_os_blocks_exist? = @on_os_blocks_exist
+
     # Specifies the cask's name.
     #
     # NOTE: Multiple names can be specified.
@@ -189,6 +275,7 @@ module Cask
     # ```
     #
     # @api public
+    sig { params(args: T.any(String, T::Array[String])).returns(T::Array[String]) }
     def name(*args)
       return @name if args.empty?
 
@@ -204,11 +291,21 @@ module Cask
     # ```
     #
     # @api public
+    sig { params(description: T.nilable(String)).returns(T.nilable(String)) }
     def desc(description = nil)
       set_unique_stanza(:desc, description.nil?) { description }
     end
 
-    def set_unique_stanza(stanza, should_return)
+    # NOTE: Using `WithoutRuntime` to avoid Sorbet wrapping this method,
+    # which would interfere with `caller_locations` in methods like `url`.
+    T::Sig::WithoutRuntime.sig {
+      type_parameters(:U).params(
+        stanza:        Symbol,
+        should_return: T::Boolean,
+        _block:        T.proc.returns(T.all(BasicObject, T.type_parameter(:U))),
+      ).returns(T.type_parameter(:U))
+    }
+    def set_unique_stanza(stanza, should_return, &_block)
       return instance_variable_get(:"@#{stanza}") if should_return
 
       unless @cask.allow_reassignment
@@ -216,7 +313,7 @@ module Cask
           raise CaskInvalidError.new(cask, "'#{stanza}' stanza may only appear once.")
         end
 
-        if instance_variable_defined?(:"@#{stanza}_set_in_block") && @called_in_on_system_block
+        if instance_variable_get(:"@#{stanza}_set_in_block") && @called_in_on_system_block
           raise CaskInvalidError.new(cask, "'#{stanza}' stanza may only be overridden once.")
         end
       end
@@ -234,14 +331,33 @@ module Cask
     # ### Example
     #
     # ```ruby
-    # homepage "https://code.visualstudio.com/"
+    # homepage "https://code.visualstudio.com/", browsed: "2026-07-26"
     # ```
     #
+    # `browsed` is the date when a human last checked the homepage in a browser.
+    # Automated homepage availability audits are skipped for one year.
+    #
     # @api public
-    def homepage(homepage = nil)
-      set_unique_stanza(:homepage, homepage.nil?) { homepage }
+    sig { params(homepage: T.nilable(String), browsed: T.nilable(String)).returns(T.nilable(String)) }
+    def homepage(homepage = nil, browsed: nil)
+      raise CaskInvalidError.new(cask, "`browsed` requires a homepage URL") if homepage.nil? && browsed
+
+      set_unique_stanza(:homepage, homepage.nil?) do
+        @homepage_browsed = Date.parse(browsed) if browsed
+        homepage
+      end
     end
 
+    # Specifies language-specific values for the cask.
+    #
+    # @api public
+    sig {
+      params(
+        args:    String,
+        default: T::Boolean,
+        block:   T.nilable(T.proc.returns(String)),
+      ).returns(T.nilable(String))
+    }
     def language(*args, default: false, &block)
       if args.empty?
         language_eval
@@ -255,11 +371,13 @@ module Cask
         end
 
         @language_blocks.default = block
+        nil
       else
         raise CaskInvalidError.new(cask, "No block given to language stanza.")
       end
     end
 
+    sig { returns(T.nilable(String)) }
     def language_eval
       return @language_eval unless @language_eval.nil?
 
@@ -277,7 +395,7 @@ module Cask
                     end
 
       locales.each do |locale|
-        key = locale.detect(@language_blocks.keys)
+        key = T.cast(locale.detect(@language_blocks.keys), T.nilable(T::Array[String]))
         next if key.nil? || (language_block = @language_blocks[key]).nil?
 
         return @language_eval = language_block.call
@@ -286,8 +404,22 @@ module Cask
       @language_eval = language_blocks_default.call
     end
 
+    sig { returns(T::Array[String]) }
     def languages
       @language_blocks.keys.flatten
+    end
+
+    sig { returns(T::Array[T::Array[String]]) }
+    def language_groups
+      @language_blocks.keys
+    end
+
+    sig { returns(T.nilable(T::Array[String])) }
+    def default_language_group
+      default_language_block = @language_blocks.default
+      return if default_language_block.nil?
+
+      @language_blocks.key(default_language_block)
     end
 
     # Sets the cask's download URL.
@@ -299,15 +431,16 @@ module Cask
     # ```
     #
     # @api public
-    def url(*args, **options, &block)
-      caller_location = T.must(caller_locations).fetch(0)
+    T::Sig::WithoutRuntime.sig { params(uri: T.nilable(T.any(URI::Generic, String)), options: T.untyped).returns(T.nilable(URL)) }
+    def url(uri = nil, **options)
+      caller_location = caller_locations.fetch(0)
+      return @url unless uri
 
-      set_unique_stanza(:url, args.empty? && options.empty? && !block) do
-        if block
-          URL.new(*args, **options, caller_location:, dsl: self, &block)
-        else
-          URL.new(*args, **options, caller_location:)
-        end
+      # Keep accepting `verified` as a no-op for compatibility with existing casks.
+      # odeprecated "the `verified` parameter in the `url` stanza" if options[:verified]
+
+      set_unique_stanza(:url, false) do
+        URL.new(uri, **options, caller_location:)
       end
     end
 
@@ -328,10 +461,33 @@ module Cask
     # ```
     #
     # @api public
-    def container(**kwargs)
-      set_unique_stanza(:container, kwargs.empty?) do
-        DSL::Container.new(**kwargs)
+    sig { params(nested: T.nilable(String), type: T.nilable(Symbol)).returns(T.nilable(DSL::Container)) }
+    def container(nested: nil, type: nil)
+      set_unique_stanza(:container, nested.nil? && type.nil?) do
+        DSL::Container.new(nested:, type:)
       end
+    end
+
+    # Renames files after extraction.
+    #
+    # This is useful when the downloaded file has unpredictable names
+    # that need to be normalized for proper artifact installation.
+    #
+    # ### Example
+    #
+    # ```ruby
+    # rename "RØDECaster App*.pkg", "RØDECaster App.pkg"
+    # ```
+    #
+    # @api public
+    sig {
+      params(from: String,
+             to:   String).returns(T::Array[DSL::Rename])
+    }
+    def rename(from = T.unsafe(nil), to = T.unsafe(nil))
+      return @rename if from.nil?
+
+      @rename << DSL::Rename.new(from, to)
     end
 
     # Sets the cask's version.
@@ -351,7 +507,7 @@ module Cask
           raise CaskInvalidError.new(cask, "invalid 'version' value: #{arg.inspect}")
         end
 
-        no_autobump! because: :latest_version if arg == :latest
+        set_no_autobump(because: :latest_version) if arg == :latest && !no_autobump_defined?
 
         DSL::Version.new(arg)
       end
@@ -402,9 +558,26 @@ module Cask
         )
         case val
         when :no_check
-          val
+          :no_check
         when String
           Checksum.new(val)
+        when nil
+          # Checksums declared for only the other OS mean no checksum for the
+          # running OS, matching `sha256` inside an `on_macos`/`on_linux` block;
+          # `depends_on` governs whether the cask is usable there. A checksum
+          # declared for the running OS but missing the running architecture
+          # still raises on the real system but is nil under simulation so
+          # API variations can be generated for the missing architecture.
+          running_os_checksums = if OnSystem.os_condition_met?(:linux)
+            [x86_64_linux, arm64_linux]
+          else
+            [arm, x86_64]
+          end
+          if running_os_checksums.any?(&:present?) && !Homebrew::SimulateSystem.simulating?
+            raise CaskInvalidError.new(cask, "invalid 'sha256' value: nil")
+          end
+
+          nil
         else
           raise CaskInvalidError.new(cask, "invalid 'sha256' value: #{val.inspect}")
         end
@@ -420,6 +593,7 @@ module Cask
     # ```
     #
     # @api public
+    sig { params(arm: T.nilable(String), intel: T.nilable(String)).returns(T.nilable(String)) }
     def arch(arm: nil, intel: nil)
       should_return = arm.nil? && intel.nil?
 
@@ -450,6 +624,7 @@ module Cask
 
       set_unique_stanza(:os, should_return) do
         @on_system_blocks_exist = true
+        @on_os_blocks_exist = true
 
         on_system_conditional(macos:, linux:)
       end
@@ -460,28 +635,37 @@ module Cask
     # NOTE: Multiple dependencies can be specified.
     #
     # @api public
-    def depends_on(**kwargs)
+    sig { params(arg: T.nilable(Symbol), kwargs: T.untyped).returns(DSL::DependsOn) }
+    def depends_on(arg = nil, **kwargs)
       @depends_on_set_in_block = true if @called_in_on_system_block
+      if arg == :macos
+        if kwargs.key?(:macos) || kwargs.key?(:maximum_macos)
+          raise CaskInvalidError.new(cask, "`depends_on :macos` cannot be combined with another macOS `depends_on`")
+        end
+
+        kwargs[:macos] = :any
+      elsif arg == :linux
+        kwargs[:linux] = :any
+      elsif arg
+        raise CaskInvalidError.new(cask, "invalid 'depends_on' value: #{arg.inspect}")
+      end
       return @depends_on if kwargs.empty?
 
       begin
-        @depends_on.load(**kwargs)
+        # Only OS blocks scope a dependency to one OS: `on_arm`/`on_intel`
+        # blocks are evaluated on every OS, so a macOS dependency inside one
+        # applies everywhere and marks the cask macOS-only.
+        @depends_on.load(kwargs, set_in_block: @called_in_on_system_block, os_scoped: @called_in_on_os_block)
       rescue RuntimeError => e
         raise CaskInvalidError.new(cask, e)
       end
       @depends_on
     end
 
-    # @api private
-    def add_implicit_macos_dependency
-      return if (cask_depends_on = @depends_on).present? && cask_depends_on.macos.present?
-
-      depends_on macos: ">= :#{MacOSVersion::SYMBOLS.key MacOSVersion::SYMBOLS.values.min}"
-    end
-
     # Declare conflicts that keep a cask from installing or working correctly.
     #
     # @api public
+    sig { params(kwargs: T.anything).returns(T.nilable(DSL::ConflictsWith)) }
     def conflicts_with(**kwargs)
       # TODO: Remove this constraint and instead merge multiple `conflicts_with` stanzas
       set_unique_stanza(:conflicts_with, kwargs.empty?) { DSL::ConflictsWith.new(**kwargs) }
@@ -506,6 +690,12 @@ module Cask
     # Provide the user with cask-specific information at install time.
     #
     # @api public
+    sig {
+      params(
+        strings: String,
+        block:   T.nilable(T.proc.returns(T.nilable(T.any(Symbol, String)))),
+      ).returns(T.any(String, DSL::Caveats))
+    }
     def caveats(*strings, &block)
       if block
         @caveats.eval_caveats(&block)
@@ -519,9 +709,13 @@ module Cask
       @caveats
     end
 
+    sig { returns(DSL::Caveats) }
+    def caveats_object = @caveats
+
     # Asserts that the cask artifacts auto-update.
     #
     # @api public
+    sig { params(auto_updates: T.nilable(T::Boolean)).returns(T.nilable(T::Boolean)) }
     def auto_updates(auto_updates = nil)
       set_unique_stanza(:auto_updates, auto_updates.nil?) { auto_updates }
     end
@@ -529,6 +723,7 @@ module Cask
     # Automatically fetch the latest version of a cask from changelogs.
     #
     # @api public
+    sig { params(block: T.nilable(T.proc.bind(Livecheck).void)).returns(Livecheck) }
     def livecheck(&block)
       return @livecheck unless block
 
@@ -538,47 +733,27 @@ module Cask
 
       @livecheck_defined = true
       @livecheck.instance_eval(&block)
-      no_autobump! because: :extract_plist if @livecheck.strategy == :extract_plist
+      set_no_autobump(because: :extract_plist) if @livecheck.strategy == :extract_plist && !no_autobump_defined?
       @livecheck
-    end
-
-    # Whether the cask contains a `livecheck` block. This is a legacy alias
-    # for `#livecheck_defined?`.
-    sig { returns(T::Boolean) }
-    def livecheckable?
-      odeprecated "`livecheckable?`", "`livecheck_defined?`"
-      @livecheck_defined == true
     end
 
     # Excludes the cask from autobump list.
     #
-    # TODO: limit this method to the official taps only (f.e. raise
-    # an error if `!tap.official?`)
-    #
     # @api public
     sig { params(because: T.any(String, Symbol)).void }
     def no_autobump!(because:)
-      if because.is_a?(Symbol) && !NO_AUTOBUMP_REASONS_LIST.key?(because)
-        raise ArgumentError, "'because' argument should use valid symbol or a string!"
+      tap = @cask.tap
+      if tap && !tap.official?
+        raise CaskInvalidError.new(cask, "'no_autobump!' can only be used in official Homebrew taps.")
       end
 
-      if !@cask.allow_reassignment && @no_autobump_defined
-        raise CaskInvalidError.new(cask, "'no_autobump_defined' stanza may only appear once.")
-      end
-
-      @no_autobump_defined = true
-      @no_autobump_message = because
-      @autobump = false
+      set_no_autobump(because:)
     end
 
     # Is the cask in autobump list?
+    sig { returns(T::Boolean) }
     def autobump?
       @autobump == true
-    end
-
-    # Is no_autobump! method defined?
-    def no_autobump_defined?
-      @no_autobump_defined == true
     end
 
     # Declare that a cask is no longer functional or supported.
@@ -586,6 +761,15 @@ module Cask
     # NOTE: A warning will be shown when trying to install this cask.
     #
     # @api public
+    sig {
+      params(
+        date:                String,
+        because:             T.any(String, Symbol),
+        replacement:         T.nilable(String),
+        replacement_formula: T.nilable(String),
+        replacement_cask:    T.nilable(String),
+      ).void
+    }
     def deprecate!(date:, because:, replacement: nil, replacement_formula: nil, replacement_cask: nil)
       if [replacement, replacement_formula, replacement_cask].filter_map(&:presence).length > 1
         raise ArgumentError, "more than one of replacement, replacement_formula and/or replacement_cask specified!"
@@ -597,6 +781,8 @@ module Cask
           "deprecate!(:replacement_formula) or deprecate!(:replacement_cask)",
         )
       end
+
+      @deprecate_args = { date:, because:, replacement_formula:, replacement_cask: }
 
       @deprecation_date = Date.parse(date)
       return if @deprecation_date > Date.today
@@ -612,10 +798,22 @@ module Cask
     # NOTE: An error will be thrown when trying to install this cask.
     #
     # @api public
+    sig {
+      params(
+        date:                String,
+        because:             T.any(String, Symbol),
+        replacement:         T.nilable(String),
+        replacement_formula: T.nilable(String),
+        replacement_cask:    T.nilable(String),
+      ).void
+    }
     def disable!(date:, because:, replacement: nil, replacement_formula: nil, replacement_cask: nil)
       if [replacement, replacement_formula, replacement_cask].filter_map(&:presence).length > 1
         raise ArgumentError, "more than one of replacement, replacement_formula and/or replacement_cask specified!"
       end
+
+      # odeprecate: remove this remapping when the :unsigned reason is removed
+      because = :fails_gatekeeper_check if because == :unsigned
 
       if replacement
         odeprecated(
@@ -623,6 +821,8 @@ module Cask
           "disable!(:replacement_formula) or disable!(:replacement_cask)",
         )
       end
+
+      @disable_args = { date:, because:, replacement_formula:, replacement_cask: }
 
       @disable_date = Date.parse(date)
 
@@ -660,22 +860,33 @@ module Cask
       [klass.dsl_key, klass.uninstall_dsl_key].each do |dsl_key|
         define_method(dsl_key) do |&block|
           T.bind(self, DSL)
+          # odeprecated "`#{dsl_key}`", "`#{dsl_key}_steps`"
           artifacts.add(klass.new(cask, dsl_key => block))
         end
       end
     end
 
-    def method_missing(method, *)
-      if method
-        Utils.method_missing_message(method, token)
-        nil
-      else
-        super
+    INSTALL_STEP_ARTIFACT_CLASSES.each do |klass|
+      define_method(klass.dsl_key) do |steps = nil, **kwargs, &block|
+        T.bind(self, DSL)
+        steps = if block
+          Homebrew::InstallSteps::DSL.build(default_base: :staged_path, default_source_base: :staged_path,
+                                            default_target_base: :staged_path, &block)
+        else
+          Homebrew::InstallSteps::DSL.normalise_steps([kwargs[:steps] || steps].flatten.compact)
+        end
+        artifacts.add(klass.new(cask, steps))
       end
     end
 
-    def respond_to_missing?(*)
-      true
+    sig { override.params(method: Symbol, _args: T.anything).returns(T.noreturn) }
+    def method_missing(method, *_args)
+      raise NoMethodError, "undefined method '#{method}' for Cask '#{token}'"
+    end
+
+    sig { override.params(_method_name: T.any(String, Symbol), _include_private: T::Boolean).returns(T::Boolean) }
+    def respond_to_missing?(_method_name, _include_private = false)
+      false
     end
 
     sig { returns(T.nilable(MacOSVersion)) }
@@ -691,6 +902,30 @@ module Cask
       return HOMEBREW_CASK_APPDIR_PLACEHOLDER if Cask.generating_hash?
 
       cask.config.appdir
+    end
+
+    private
+
+    sig { returns(T::Boolean) }
+    def no_autobump_defined?
+      @no_autobump_defined
+    end
+
+    sig { params(because: T.any(String, Symbol)).void }
+    def set_no_autobump(because:)
+      if because.is_a?(Symbol) && !NO_AUTOBUMP_REASONS_LIST.key?(because)
+        raise ArgumentError, "'because' argument should use valid symbol or a string!"
+      end
+
+      if !@cask.allow_reassignment && no_autobump_defined?
+        raise CaskInvalidError.new(cask, "'no_autobump!' stanza may only appear once.")
+      end
+
+      odisabled "no_autobump! because: :requires_manual_review" if because == :requires_manual_review
+
+      @no_autobump_defined = true
+      @no_autobump_message = because
+      @autobump = false
     end
   end
 end

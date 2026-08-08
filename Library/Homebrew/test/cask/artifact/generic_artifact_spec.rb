@@ -1,3 +1,4 @@
+# typed: true
 # frozen_string_literal: true
 
 RSpec.describe Cask::Artifact::Artifact, :cask do
@@ -5,21 +6,21 @@ RSpec.describe Cask::Artifact::Artifact, :cask do
 
   let(:install_phase) do
     lambda do
-      cask.artifacts.select { |a| a.is_a?(described_class) }.each do |artifact|
+      cask.artifacts.grep(described_class).each do |artifact|
         artifact.install_phase(command: NeverSudoSystemCommand, force: false)
       end
     end
   end
 
   let(:source_path) { cask.staged_path.join("Caffeine.app") }
-  let(:target_path) { cask.config.appdir.join("Caffeine.app") }
+  let(:target_path) { Pathname(cask.config.appdir).join("Caffeine.app") }
 
   before do
     InstallHelper.install_without_artifacts(cask)
   end
 
   context "without target" do
-    it "fails to load" do
+    it "fails to load", :no_api do
       expect do
         Cask::CaskLoader.load("invalid-generic-artifact-no-target")
       end.to raise_error(Cask::CaskInvalidError, /Generic Artifact.*requires.*target/)

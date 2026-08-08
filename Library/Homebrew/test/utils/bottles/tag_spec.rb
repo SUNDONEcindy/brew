@@ -1,3 +1,4 @@
+# typed: strict
 # frozen_string_literal: true
 
 require "utils/bottles"
@@ -36,6 +37,18 @@ RSpec.describe Utils::Bottles::Tag do
     expect(tag.to_sym).to eq(symbol)
   end
 
+  describe ".from_arg" do
+    it "parses an explicit tag argument" do
+      expect(described_class.from_arg(:arm64_big_sur, os: :monterey, arch: :x86_64))
+        .to eq(described_class.new(system: :big_sur, arch: :arm64))
+    end
+
+    it "builds from the given os and arch when no argument is passed" do
+      expect(described_class.from_arg(nil, os: :monterey, arch: :arm64))
+        .to eq(described_class.new(system: :monterey, arch: :arm64))
+    end
+  end
+
   describe "#==" do
     it "compares using the standardized arch" do
       monterey_intel = described_class.new(system: :monterey, arch: :intel)
@@ -46,11 +59,8 @@ RSpec.describe Utils::Bottles::Tag do
   end
 
   describe "#standardized_arch" do
-    it "returns :x86_64 for :intel" do
+    specify do
       expect(described_class.new(system: :all, arch: :intel).standardized_arch).to eq(:x86_64)
-    end
-
-    it "returns :arm64 for :arm" do
       expect(described_class.new(system: :all, arch: :arm).standardized_arch).to eq(:arm64)
     end
   end
@@ -63,10 +73,8 @@ RSpec.describe Utils::Bottles::Tag do
       expect(tag.valid_combination?).to be true
     end
 
-    it "returns false for ARM on macOS Catalina or older" do
+    it "returns false for ARM on macOS Catalina" do
       tag = described_class.new(system: :catalina, arch: :arm64)
-      expect(tag.valid_combination?).to be false
-      tag = described_class.new(system: :mojave, arch: :arm)
       expect(tag.valid_combination?).to be false
     end
 

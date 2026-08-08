@@ -16,10 +16,10 @@ module Homebrew
           Note that this command depends on the GitHub CLI. Run `brew install gh`.
         EOS
         flag   "--os=",
-               description: "Download for the given operating system." \
+               description: "Download for the given operating system. " \
                             "(Pass `all` to download for all operating systems.)"
         flag   "--arch=",
-               description: "Download for the given CPU architecture." \
+               description: "Download for the given CPU architecture. " \
                             "(Pass `all` to download for all architectures.)"
         flag   "--bottle-tag=",
                description: "Download a bottle for given tag."
@@ -29,8 +29,10 @@ module Homebrew
                description: "Remove a previously cached version and re-fetch."
         switch "-j", "--json",
                description: "Return JSON for the attestation data for each bottle."
+
         conflicts "--os", "--bottle-tag"
         conflicts "--arch", "--bottle-tag"
+
         named_args [:formula], min: 1
       end
 
@@ -49,11 +51,7 @@ module Homebrew
         bucket.each do |formula|
           os_arch_combinations.each do |os, arch|
             SimulateSystem.with(os:, arch:) do
-              bottle_tag = if (bottle_tag = args.bottle_tag&.to_sym)
-                Utils::Bottles::Tag.from_symbol(bottle_tag)
-              else
-                Utils::Bottles::Tag.new(system: os, arch:)
-              end
+              bottle_tag = Utils::Bottles::Tag.from_arg(args.bottle_tag&.to_sym, os:, arch:)
 
               bottle = formula.bottle_for_tag(bottle_tag)
 

@@ -4,13 +4,13 @@
 require "abstract_command"
 require "formula"
 require "missing_formula"
-require "descriptions"
 require "search"
 
 module Homebrew
   module Cmd
     class SearchCmd < AbstractCommand
       PACKAGE_MANAGERS = T.let({
+        alpine:    ->(query) { "https://pkgs.alpinelinux.org/packages?name=#{query}" },
         repology:  ->(query) { "https://repology.org/projects/?search=#{query}" },
         macports:  ->(query) { "https://ports.macports.org/search/?q=#{query}" },
         fink:      ->(query) { "https://pdb.finkproject.org/pdb/browse.php?summary=#{query}" },
@@ -38,9 +38,10 @@ module Homebrew
                description: "Search for formulae with a description matching <text> and casks with " \
                             "a name or description matching <text>."
         switch "--eval-all",
-               depends_on:  "--desc",
                description: "Evaluate all available formulae and casks, whether installed or not, to search their " \
-                            "descriptions. Implied if `$HOMEBREW_EVAL_ALL` is set."
+                            "descriptions.",
+               env:         :eval_all,
+               odeprecated: true
         switch "--pull-request",
                description: "Search for GitHub pull requests containing <text>."
         switch "--open",
@@ -64,17 +65,19 @@ module Homebrew
 
       sig { override.void }
       def run
-        return if search_package_manager
+        return if search_package_manager!
 
         query = args.named.join(" ")
         string_or_regex = Search.query_regexp(query)
 
         if args.desc?
-          if !args.eval_all? && !Homebrew::EnvConfig.eval_all? && Homebrew::EnvConfig.no_install_from_api?
-            raise UsageError, "`brew search --desc` needs `--eval-all` passed or `$HOMEBREW_EVAL_ALL` set!"
+          if !args.eval_all? && !Homebrew::EnvConfig.tap_trust_configured? && Homebrew::EnvConfig.no_install_from_api?
+            raise UsageError,
+                  "`brew search --desc` needs `HOMEBREW_REQUIRE_TAP_TRUST=1` or " \
+                  "`HOMEBREW_NO_REQUIRE_TAP_TRUST=1` set!"
           end
 
-          Search.search_descriptions(string_or_regex, args)
+          Search.search_descriptions(string_or_regex, args, show_missing: true)
         elsif args.pull_request?
           search_pull_requests(query)
         else
@@ -85,6 +88,21 @@ module Homebrew
         puts "Use `brew desc` to list packages with a short description." if args.verbose?
 
         print_regex_help
+      end
+
+      sig { params(query: String, found_matches: T::Boolean).void }
+      def print_missing_formula_help(query, found_matches)
+        return unless $stdout.tty?
+        return if query.match?(Search::QUERY_REGEX)
+
+        reason = MissingFormula.reason(query, silent: true)
+        return if reason.nil?
+
+        if found_matches
+          puts
+          puts "If you meant #{query.inspect} specifically:"
+        end
+        puts reason
       end
 
       private
@@ -107,7 +125,7 @@ module Homebrew
       end
 
       sig { returns(T::Boolean) }
-      def search_package_manager
+      def search_package_manager!
         package_manager = PACKAGE_MANAGERS.find { |name,| args.public_send(:"#{name}?") }
         return false if package_manager.nil?
 
@@ -116,7 +134,7 @@ module Homebrew
         true
       end
 
-      sig { params(query: String).returns(String) }
+      sig { params(query: String).void }
       def search_pull_requests(query)
         only = if args.open? && !args.closed?
           "open"
@@ -150,20 +168,6 @@ module Homebrew
         print_missing_formula_help(query, count.positive?) if all_casks.exclude?(query)
 
         odie "No formulae or casks found for #{query.inspect}." if count.zero?
-      end
-
-      sig { params(query: String, found_matches: T::Boolean).void }
-      def print_missing_formula_help(query, found_matches)
-        return unless $stdout.tty?
-
-        reason = MissingFormula.reason(query, silent: true)
-        return if reason.nil?
-
-        if found_matches
-          puts
-          puts "If you meant #{query.inspect} specifically:"
-        end
-        puts reason
       end
     end
   end

@@ -1,3 +1,4 @@
+# typed: true
 # frozen_string_literal: true
 
 raise "This needs to be required before Cachable gets loaded normally." if defined?(Cachable)
@@ -21,8 +22,6 @@ module Cachable
   end
 
   module Inherited
-    private
-
     def inherited(klass)
       # A class might inherit Cachable at the instance level
       # and in that case we just want to skip registering it.

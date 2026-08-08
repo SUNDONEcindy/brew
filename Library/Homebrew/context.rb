@@ -1,4 +1,4 @@
-# typed: true # rubocop:todo Sorbet/StrictSigil
+# typed: strict
 # frozen_string_literal: true
 
 require "monitor"
@@ -7,28 +7,21 @@ require "monitor"
 module Context
   extend MonitorMixin
 
-  def self.current=(context)
-    synchronize do
-      @current = context
-    end
-  end
-
-  def self.current
-    if (current_context = Thread.current[:context])
-      return current_context
-    end
-
-    synchronize do
-      @current ||= ContextStruct.new
-    end
-  end
-
   # Struct describing the current execution context.
   class ContextStruct
-    def initialize(debug: nil, quiet: nil, verbose: nil)
+    sig {
+      params(
+        debug:                          T.nilable(T::Boolean),
+        quiet:                          T.nilable(T::Boolean),
+        verbose:                        T.nilable(T::Boolean),
+        deferred_environment_expansion: T.nilable(T::Boolean),
+      ).void
+    }
+    def initialize(debug: nil, quiet: nil, verbose: nil, deferred_environment_expansion: nil)
       @debug = debug
       @quiet = quiet
       @verbose = verbose
+      @deferred_environment_expansion = deferred_environment_expansion
     end
 
     sig { returns(T::Boolean) }
@@ -44,6 +37,33 @@ module Context
     sig { returns(T::Boolean) }
     def verbose?
       @verbose == true
+    end
+
+    sig { returns(T::Boolean) }
+    def deferred_environment_expansion?
+      @deferred_environment_expansion == true
+    end
+  end
+
+  @current = T.let(nil, T.nilable(ContextStruct))
+
+  sig { params(context: ContextStruct).void }
+  def self.current=(context)
+    synchronize do
+      @current = context
+    end
+  end
+
+  sig { returns(ContextStruct) }
+  def self.current
+    current_context = T.cast(Thread.current[:context], T.nilable(ContextStruct))
+    return current_context if current_context
+
+    synchronize do
+      current = T.let(@current, T.nilable(ContextStruct))
+      current ||= ContextStruct.new
+      @current = current
+      current
     end
   end
 
@@ -62,16 +82,24 @@ module Context
     Context.current.verbose?
   end
 
-  def with_context(**options)
+  sig { returns(T::Boolean) }
+  def deferred_environment_expansion?
+    Context.current.deferred_environment_expansion?
+  end
+
+  sig {
+    params(
+      debug:                          T.nilable(T::Boolean),
+      quiet:                          T.nilable(T::Boolean),
+      verbose:                        T.nilable(T::Boolean),
+      deferred_environment_expansion: T.nilable(T::Boolean),
+      _block:                         T.proc.void,
+    ).returns(T.untyped)
+  }
+  def with_context(debug: debug?, quiet: quiet?, verbose: verbose?,
+                   deferred_environment_expansion: deferred_environment_expansion?, &_block)
     old_context = Context.current
-
-    new_context = ContextStruct.new(
-      debug:   options.fetch(:debug, old_context&.debug?),
-      quiet:   options.fetch(:quiet, old_context&.quiet?),
-      verbose: options.fetch(:verbose, old_context&.verbose?),
-    )
-
-    Thread.current[:context] = new_context
+    Thread.current[:context] = ContextStruct.new(debug:, quiet:, verbose:, deferred_environment_expansion:)
 
     begin
       yield

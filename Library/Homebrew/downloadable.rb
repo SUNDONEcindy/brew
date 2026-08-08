@@ -4,15 +4,70 @@
 require "url"
 require "checksum"
 require "download_strategy"
+require "utils/output"
 
 module Downloadable
   include Context
+  include Utils::Output::Mixin
   extend T::Helpers
 
   abstract!
   requires_ancestor { Kernel }
 
-  sig { overridable.returns(T.any(NilClass, String, URL)) }
+  # Remembers which files have already been checksum-verified in this process,
+  # so the same unchanged file is not hashed once per download object that
+  # references it.
+  class VerificationCache
+    include Context
+    include Utils::Output::Mixin
+
+    sig { void }
+    def initialize
+      require "concurrent/set"
+
+      @verified = T.let(Concurrent::Set.new, Concurrent::Set)
+    end
+
+    # Verifies the file against the checksum unless this file, in this
+    # state, has already been verified against it in this process.
+    sig { params(filename: Pathname, checksum: T.nilable(Checksum)).void }
+    def verify(filename, checksum)
+      key = key_for(filename, checksum)
+
+      if key && @verified.include?(key)
+        odebug "Skipping checksum verification for '#{filename.basename}' (already verified in this run)"
+        return
+      end
+
+      ohai "Verifying checksum for '#{filename.basename}'" if verbose?
+      filename.verify_checksum(checksum)
+
+      @verified.add(key) if key
+    end
+
+    private
+
+    # The size and modification time ensure a file downloaded again to the
+    # same path (e.g. after `--force` cleared the cache) is verified again.
+    sig { params(filename: Pathname, checksum: T.nilable(Checksum)).returns(T.nilable(String)) }
+    def key_for(filename, checksum)
+      return if checksum.nil?
+
+      stat = filename.stat
+      "#{filename.expand_path}|#{checksum.hexdigest}|#{stat.size}|#{stat.mtime.to_f}"
+    rescue SystemCallError
+      nil
+    end
+  end
+
+  class << self
+    sig { returns(VerificationCache) }
+    def verification_cache
+      @verification_cache ||= T.let(VerificationCache.new, T.nilable(VerificationCache))
+    end
+  end
+
+  sig { overridable.returns(T.nilable(T.any(String, URL))) }
   attr_reader :url
 
   sig { overridable.returns(T.nilable(Checksum)) }
@@ -20,6 +75,20 @@ module Downloadable
 
   sig { overridable.returns(T::Array[String]) }
   attr_reader :mirrors
+
+  sig { overridable.returns(Symbol) }
+  attr_accessor :phase
+
+  sig { void }
+  def downloading! = (@phase = :downloading)
+  sig { void }
+  def downloaded! = (@phase = :downloaded)
+  sig { void }
+  def verifying! = (@phase = :verifying)
+  sig { void }
+  def verified! = (@phase = :verified)
+  sig { void }
+  def extracting! = (@phase = :extracting)
 
   sig { void }
   def initialize
@@ -30,9 +99,10 @@ module Downloadable
     @download_strategy = T.let(nil, T.nilable(T::Class[AbstractDownloadStrategy]))
     @downloader = T.let(nil, T.nilable(AbstractDownloadStrategy))
     @download_name = T.let(nil, T.nilable(String))
+    @phase = T.let(:preparing, Symbol)
   end
 
-  sig { params(other: Object).void }
+  sig { overridable.params(other: Downloadable).void }
   def initialize_dup(other)
     super
     @checksum = @checksum.dup
@@ -48,18 +118,31 @@ module Downloadable
     super
   end
 
-  sig { abstract.returns(String) }
-  def name; end
-
   sig { returns(String) }
-  def download_type
-    class_name = T.let(self.class, T::Class[Downloadable]).name&.split("::")&.last
-    T.must(class_name).gsub(/([[:lower:]])([[:upper:]])/, '\1 \2').downcase
+  def download_queue_name = download_name
+
+  sig { abstract.returns(String) }
+  def download_queue_type; end
+
+  sig(:final) { returns(String) }
+  def download_queue_message
+    "#{download_queue_type} #{download_queue_name}"
   end
 
   sig(:final) { returns(T::Boolean) }
   def downloaded?
     cached_download.exist?
+  end
+
+  sig { overridable.returns(T::Boolean) }
+  def downloaded_and_valid?
+    return false unless cached_download.file?
+    return false if checksum.blank?
+
+    with_context(quiet: true) { verify_download_integrity(cached_download) }
+    true
+  rescue ChecksumMismatchError
+    false
   end
 
   sig { overridable.returns(Pathname) }
@@ -70,6 +153,18 @@ module Downloadable
   sig { overridable.void }
   def clear_cache
     downloader.clear_cache
+  end
+
+  # Total bytes downloaded if available.
+  sig { overridable.returns(T.nilable(Integer)) }
+  def fetched_size
+    downloader.fetched_size
+  end
+
+  # Total download size if available.
+  sig { overridable.returns(T.nilable(Integer)) }
+  def total_size
+    @total_size ||= T.let(downloader.total_size, T.nilable(Integer))
   end
 
   sig { overridable.returns(T.nilable(Version)) }
@@ -92,7 +187,12 @@ module Downloadable
       raise ArgumentError, "attempted to use a `Downloadable` without a URL!" if primary_url.blank?
 
       download_strategy.new(primary_url, download_name, version,
-                            mirrors:, cache:, **T.must(@url).specs)
+                            mirrors:, cache:, **T.must(@url).specs).tap do |downloader|
+        if downloader.is_a?(CurlDownloadStrategy) &&
+           AbstractDownloadStrategy.expand_deferred_environment_for?(downloader)
+          downloader.allow_deferred_environment_expansion!
+        end
+      end
     end
   end
 
@@ -104,6 +204,8 @@ module Downloadable
     ).returns(Pathname)
   }
   def fetch(verify_download_integrity: true, timeout: nil, quiet: false)
+    downloading!
+
     cache.mkpath
 
     begin
@@ -113,16 +215,28 @@ module Downloadable
       raise DownloadError.new(self, e)
     end
 
+    downloaded!
+
     download = cached_download
     verify_download_integrity(download) if verify_download_integrity
     download
   end
 
+  sig { overridable.params(_download: Pathname, pour: T::Boolean).returns(T::Boolean) }
+  def stage_from_download_queue?(_download, pour:)
+    false
+  end
+
+  sig { overridable.params(_download: Pathname, pour: T::Boolean).void }
+  def stage_from_download_queue(_download, pour:); end
+
   sig { overridable.params(filename: Pathname).void }
   def verify_download_integrity(filename)
+    verifying!
+
     if filename.file?
-      ohai "Verifying checksum for '#{filename.basename}'" if verbose?
-      filename.verify_checksum(checksum)
+      Downloadable.verification_cache.verify(filename, checksum)
+      verified!
     end
   rescue ChecksumMissingError
     return if silence_checksum_missing_error?
@@ -135,12 +249,32 @@ module Downloadable
     EOS
   end
 
+  sig { returns(Integer) }
+  def hash
+    [self.class, cached_download].hash
+  end
+
+  sig { params(other: Object).returns(T::Boolean) }
+  def eql?(other)
+    return false if self.class != other.class
+
+    other = T.cast(other, Downloadable)
+    cached_download == other.cached_download
+  end
+
+  sig { returns(String) }
+  def to_s
+    short_cached_download = cached_download.to_s
+                                           .delete_prefix("#{HOMEBREW_CACHE}/downloads/")
+    "#<#{self.class}: #{short_cached_download}>"
+  end
+
+  private
+
   sig { overridable.returns(String) }
   def download_name
     @download_name ||= File.basename(determine_url.to_s).freeze
   end
-
-  private
 
   sig { overridable.returns(T::Boolean) }
   def silence_checksum_missing_error?

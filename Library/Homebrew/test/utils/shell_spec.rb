@@ -1,3 +1,4 @@
+# typed: true
 # frozen_string_literal: true
 
 require "utils/shell"
@@ -67,20 +68,20 @@ RSpec.describe Utils::Shell do
   end
 
   specify "::sh_quote" do
-    expect(described_class.send(:sh_quote, "")).to eq("''")
-    expect(described_class.send(:sh_quote, "\\")).to eq("\\\\")
-    expect(described_class.send(:sh_quote, "\n")).to eq("'\n'")
-    expect(described_class.send(:sh_quote, "$")).to eq("\\$")
-    expect(described_class.send(:sh_quote, "word")).to eq("word")
+    expect(described_class.sh_quote("")).to eq("''")
+    expect(described_class.sh_quote("\\")).to eq("\\\\")
+    expect(described_class.sh_quote("\n")).to eq("'\n'")
+    expect(described_class.sh_quote("$")).to eq("\\$")
+    expect(described_class.sh_quote("word")).to eq("word")
   end
 
   specify "::csh_quote" do
-    expect(described_class.send(:csh_quote, "")).to eq("''")
-    expect(described_class.send(:csh_quote, "\\")).to eq("\\\\")
+    expect(described_class.csh_quote("")).to eq("''")
+    expect(described_class.csh_quote("\\")).to eq("\\\\")
     # NOTE: This test is different than for `sh`.
-    expect(described_class.send(:csh_quote, "\n")).to eq("'\\\n'")
-    expect(described_class.send(:csh_quote, "$")).to eq("\\$")
-    expect(described_class.send(:csh_quote, "word")).to eq("word")
+    expect(described_class.csh_quote("\n")).to eq("'\\\n'")
+    expect(described_class.csh_quote("$")).to eq("\\$")
+    expect(described_class.csh_quote("word")).to eq("word")
   end
 
   describe "::prepend_path_in_profile" do
@@ -106,19 +107,43 @@ RSpec.describe Utils::Shell do
     end
   end
 
+  describe "::set_variable_in_profile" do
+    it "supports mksh" do
+      ENV["SHELL"] = "/bin/mksh"
+      expect(described_class.set_variable_in_profile("HOMEBREW_FOO", "bar"))
+        .to eq("echo 'export HOMEBREW_FOO=bar' >> #{described_class.profile}")
+    end
+  end
+
   describe "::shell_with_prompt" do
+    let(:home) { HOMEBREW_TEMP }
+    let(:notice) { "" }
+    let(:prompt) { "test" }
+    let(:path) { "/some/path" }
+
     it "returns zsh-specific prompt configuration" do
-      ENV["SHELL"] = "/bin/zsh"
-      expect(described_class.shell_with_prompt("test", preferred_path: "/bin/zsh", notice: "")).to eq(
-        "PROMPT='%B%F{green}test%f %F{blue}$%f%b ' RPROMPT='[%B%F{red}%~%f%b]' /bin/zsh -f",
-      )
+      preferred_path = "/bin/zsh"
+      ENV["SHELL"] = preferred_path
+      ENV["PATH"] = path
+      zdotdir = "#{HOMEBREW_TEMP}/brew-zsh-prompt-#{Process.euid}"
+      expect(described_class.shell_with_prompt(prompt, preferred_path:, notice:, home:)).to eq \
+        "BREW_PROMPT_PATH=\"#{path}\" BREW_PROMPT_TYPE=\"#{prompt}\" ZDOTDIR=\"#{zdotdir}\" #{preferred_path}"
+    end
+
+    it "returns bash-specific prompt configuration" do
+      preferred_path = "/bin/bash"
+      ENV["SHELL"] = "/bin/bash"
+      ENV["PATH"] = path
+      rcfile = "#{HOMEBREW_LIBRARY_PATH}/utils/bash/brew-sh-prompt-bashrc.bash"
+      expect(described_class.shell_with_prompt(prompt, preferred_path:, notice:, home:)).to eq \
+        "BREW_PROMPT_PATH=\"#{path}\" BREW_PROMPT_TYPE=\"#{prompt}\" #{preferred_path} --rcfile \"#{rcfile}\""
     end
 
     it "returns generic shell prompt configuration" do
-      ENV["SHELL"] = "/bin/bash"
-      expect(described_class.shell_with_prompt("test", preferred_path: "/bin/bash", notice: "")).to eq(
-        "PS1=\"\\[\\033[1;32m\\]brew \\[\\033[1;31m\\]\\w \\[\\033[1;34m\\]$\\[\\033[0m\\] \" /bin/bash",
-      )
+      preferred_path = "/bin/dash"
+      ENV["SHELL"] = preferred_path
+      expect(described_class.shell_with_prompt(prompt, preferred_path:, notice:, home:)).to eq \
+        "PS1=\"\\[\\033[1;32m\\]#{prompt} \\[\\033[1;31m\\]\\w \\[\\033[1;34m\\]$\\[\\033[0m\\] \" #{preferred_path}"
     end
 
     it "outputs notice when provided" do

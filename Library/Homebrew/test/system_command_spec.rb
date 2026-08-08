@@ -1,3 +1,4 @@
+# typed: false
 # frozen_string_literal: true
 
 require "system_command"
@@ -193,7 +194,7 @@ RSpec.describe SystemCommand do
           .and not_to_output.to_stdout
       end
 
-      context "when `debug?` is true" do
+      context "when `verbose?` and `debug?` are true" do
         include Context
 
         let(:options) do
@@ -203,8 +204,8 @@ RSpec.describe SystemCommand do
           ] }
         end
 
-        it "echoes the command and all output to STDERR when `debug?` is true" do
-          with_context debug: true do
+        it "echoes the command and all output to STDERR" do
+          with_context(verbose: true, debug: true) do
             expect { described_class.run(command, **options) }
               .to output(/\A.*#{Regexp.escape(command)}.*\n1\n2\n3\n4\n5\n6\n\Z/).to_stderr
               .and not_to_output.to_stdout
@@ -275,7 +276,7 @@ RSpec.describe SystemCommand do
 
       FileUtils.chmod "+x", path/"tool"
 
-      expect(described_class.run("tool", env: { "PATH" => path }).stdout).to include "Hello, world!"
+      expect(described_class.run("tool", env: { "PATH" => path.to_s }).stdout).to include "Hello, world!"
     end
   end
 
@@ -284,6 +285,13 @@ RSpec.describe SystemCommand do
       expect do
         described_class.run("non_existent_executable")
       end.not_to raise_error
+    end
+
+    it "uses `Process.spawn` rather than `fork` when no privilege change is required" do
+      command = described_class.new("true")
+      expect(command).not_to receive(:fork)
+      expect(Process).to receive(:spawn).and_call_original
+      command.run!
     end
 
     it 'does not format `stderr` when it starts with \r' do
@@ -323,6 +331,7 @@ RSpec.describe SystemCommand do
           described_class.run! "curl",
                                args:    %w[--user username:hunter2],
                                verbose: true,
+                               debug:   true,
                                secrets: %w[hunter2]
         end.to raise_error(ErrorDuringExecution, redacted_msg).and output(redacted_msg).to_stderr
       end
@@ -333,6 +342,7 @@ RSpec.describe SystemCommand do
           ENV["PASSWORD"] = "hunter2"
           described_class.run! "curl",
                                args:    %w[--user username:hunter2],
+                               debug:   true,
                                verbose: true
         end.to raise_error(ErrorDuringExecution, redacted_msg).and output(redacted_msg).to_stderr
       end
@@ -371,17 +381,17 @@ RSpec.describe SystemCommand do
             # Ignore SIGINT.
           end
 
-          described_class.run! "sleep", args: [5]
+          described_class.run! "sleep", args: [1]
 
           exit!
         end
 
-        sleep 1
+        sleep 0.1
         Process.kill("INT", pid)
 
         Process.waitpid(pid)
 
-        expect(Time.now - start_time).to be >= 5
+        expect(Time.now - start_time).to be >= 1
       end
     end
   end

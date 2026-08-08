@@ -1,9 +1,15 @@
+# typed: true
 # frozen_string_literal: true
 
 require "keg"
 require "stringio"
 
 RSpec.describe Keg do
+  let(:dst) { HOMEBREW_PREFIX/"bin"/"helloworld" }
+  let(:nonexistent) { Pathname.new("/some/nonexistent/path") }
+  let!(:keg) { setup_test_keg("foo", "1.0") }
+  let(:kegs) { [] }
+
   include FileUtils
 
   def setup_test_keg(name, version)
@@ -14,15 +20,10 @@ RSpec.describe Keg do
       touch path/"bin"/file
     end
 
-    keg = described_class.new(path)
+    keg = Keg.new(path)
     kegs << keg
     keg
   end
-
-  let(:dst) { HOMEBREW_PREFIX/"bin"/"helloworld" }
-  let(:nonexistent) { Pathname.new("/some/nonexistent/path") }
-  let!(:keg) { setup_test_keg("foo", "1.0") }
-  let(:kegs) { [] }
 
   before do
     (HOMEBREW_PREFIX/"bin").mkpath
@@ -166,6 +167,20 @@ RSpec.describe Keg do
       expect(link.lstat).to be_a_directory
     end
 
+    specify "lib/cps directory is created" do
+      link = HOMEBREW_PREFIX/"lib"/"cps"
+      (keg/"lib"/"cps").mkpath
+      keg.link
+      expect(link.lstat).to be_a_directory
+    end
+
+    specify "share/cps directory is created" do
+      link = HOMEBREW_PREFIX/"share"/"cps"
+      (keg/"share"/"cps").mkpath
+      keg.link
+      expect(link.lstat).to be_a_directory
+    end
+
     specify "symlinks are linked directly" do
       link = HOMEBREW_PREFIX/"lib"/"pkgconfig"
 
@@ -269,8 +284,6 @@ RSpec.describe Keg do
       expect(lib.children.length).to eq(2)
     end
 
-    # This is a legacy violation that would benefit from a clear expectation.
-    # rubocop:disable RSpec/NoExpectationExample
     it "removes broken symlinks that conflict with directories" do
       a = HOMEBREW_CELLAR/"a"/"1.0"
       (a/"lib"/"foo").mkpath
@@ -282,8 +295,9 @@ RSpec.describe Keg do
       link.make_symlink(nonexistent)
 
       keg.link
+
+      expect(link).to be_a_directory
     end
-    # rubocop:enable RSpec/NoExpectationExample
   end
 
   describe "#optlink" do
@@ -316,6 +330,29 @@ RSpec.describe Keg do
       keg.opt_record.write("foo")
       keg.optlink
       expect(keg).to be_optlinked
+    end
+  end
+
+  describe "#homebrew_created_file?" do
+    it "identifies Homebrew service files" do
+      plist_file = instance_double(Pathname, extname: ".plist", basename: Pathname.new("homebrew.foo.plist"))
+      service_file = instance_double(Pathname, extname: ".service", basename: Pathname.new("homebrew.foo.service"))
+      timer_file = instance_double(Pathname, extname: ".timer", basename: Pathname.new("homebrew.foo.timer"))
+      regular_file = instance_double(Pathname, extname: ".txt", basename: Pathname.new("readme.txt"))
+      non_homebrew_plist = instance_double(Pathname, extname:  ".plist",
+                                                     basename: Pathname.new("com.example.foo.plist"))
+
+      allow(plist_file.basename).to receive(:to_s).and_return("homebrew.foo.plist")
+      allow(service_file.basename).to receive(:to_s).and_return("homebrew.foo.service")
+      allow(timer_file.basename).to receive(:to_s).and_return("homebrew.foo.timer")
+      allow(regular_file.basename).to receive(:to_s).and_return("readme.txt")
+      allow(non_homebrew_plist.basename).to receive(:to_s).and_return("com.example.foo.plist")
+
+      expect(keg.homebrew_created_file?(plist_file)).to be true
+      expect(keg.homebrew_created_file?(service_file)).to be true
+      expect(keg.homebrew_created_file?(timer_file)).to be true
+      expect(keg.homebrew_created_file?(regular_file)).to be false
+      expect(keg.homebrew_created_file?(non_homebrew_plist)).to be false
     end
   end
 

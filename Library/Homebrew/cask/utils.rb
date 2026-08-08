@@ -1,35 +1,58 @@
-# typed: true # rubocop:todo Sorbet/StrictSigil
+# typed: strict
 # frozen_string_literal: true
 
 require "utils/user"
 require "open3"
+require "utils/output"
 
 module Cask
   # Helper functions for various cask operations.
   module Utils
-    BUG_REPORTS_URL = "https://github.com/Homebrew/homebrew-cask#reporting-bugs"
+    extend ::Utils::Output::Mixin
 
+    BUG_REPORTS_URL = "https://github.com/Homebrew/homebrew-cask#reporting-bugs"
+    FULL_DISK_ACCESS_TCC_PATH = "~/Library/Application Support/com.apple.TCC"
+
+    sig { params(access: String).returns(String) }
+    def self.privacy_security_preference_pane(access)
+      navigation_path = if MacOS.version >= :ventura
+        "System Settings → Privacy & Security"
+      else
+        "System Preferences → Security & Privacy → Privacy"
+      end
+
+      "#{navigation_path} → #{access}"
+    end
+
+    sig { returns(T::Boolean) }
+    def self.full_disk_access_enabled?
+      File.readable?(File.expand_path(FULL_DISK_ACCESS_TCC_PATH))
+    end
+
+    sig { params(path: Pathname, command: T.class_of(SystemCommand)).void }
     def self.gain_permissions_mkpath(path, command: SystemCommand)
       dir = path.ascend.find(&:directory?)
       return if path == dir
 
-      if dir.writable?
+      if dir&.writable?
         path.mkpath
       else
-        command.run!("/bin/mkdir", args: ["-p", "--", path], sudo: true, print_stderr: false)
+        command.run!("mkdir", args: ["-p", "--", path], sudo: true, print_stderr: false)
       end
     end
 
+    sig { params(path: Pathname, command: T.class_of(SystemCommand)).void }
     def self.gain_permissions_rmdir(path, command: SystemCommand)
       gain_permissions(path, [], command) do |p|
         if p.parent.writable?
           FileUtils.rmdir p
         else
-          command.run!("/bin/rmdir", args: ["--", p], sudo: true, print_stderr: false)
+          command.run!("rmdir", args: ["--", p], sudo: true, print_stderr: false)
         end
       end
     end
 
+    sig { params(path: Pathname, command: T.class_of(SystemCommand)).void }
     def self.gain_permissions_remove(path, command: SystemCommand)
       directory = false
       permission_flags = if path.symlink?
@@ -58,7 +81,15 @@ module Cask
       end
     end
 
-    def self.gain_permissions(path, command_args, command)
+    sig {
+      params(
+        path:         Pathname,
+        command_args: T::Array[String],
+        command:      T.class_of(SystemCommand),
+        _block:       T.proc.params(path: Pathname).void,
+      ).void
+    }
+    def self.gain_permissions(path, command_args, command, &_block)
       tried_permissions = false
       tried_ownership = false
       begin
@@ -74,10 +105,10 @@ module Cask
           command.run("/usr/bin/chflags",
                       print_stderr:,
                       args:         command_args + ["--", "000", path])
-          command.run("/bin/chmod",
+          command.run("chmod",
                       print_stderr:,
                       args:         command_args + ["--", "u+rwx", path])
-          command.run("/bin/chmod",
+          command.run("chmod",
                       print_stderr:,
                       args:         command_args + ["-N", path])
           tried_permissions = true
@@ -89,8 +120,8 @@ module Cask
           # TODO: Further examine files to see if ownership is the problem
           #       before using `sudo` and `chown`.
           ohai "Using sudo to gain ownership of path '#{path}'"
-          command.run("/usr/sbin/chown",
-                      args: command_args + ["--", User.current, path],
+          command.run("chown",
+                      args: command_args + ["--", User.current.to_s, path],
                       sudo: true)
           tried_ownership = true
           # retry chflags/chmod after chown
@@ -116,22 +147,6 @@ module Cask
           .gsub(/--+/, "-")
           .delete_prefix("-")
           .delete_suffix("-")
-    end
-
-    sig { returns(String) }
-    def self.error_message_with_suggestions
-      <<~EOS
-        Follow the instructions here:
-          #{Formatter.url(BUG_REPORTS_URL)}
-      EOS
-    end
-
-    def self.method_missing_message(method, token, section = nil)
-      message = "Unexpected method '#{method}' called "
-      message << "during #{section} " if section
-      message << "on Cask #{token}."
-
-      ofail "#{message}\n#{error_message_with_suggestions}"
     end
   end
 end

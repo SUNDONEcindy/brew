@@ -3,6 +3,7 @@
 # HOMEBREW_CELLAR and HOMEBREW_PREFIX are set by extend/ENV/super.rb
 # HOMEBREW_REPOSITORY is set by bin/brew
 # Leading colon in MANPATH prepends default man dirs to search path in Linux and macOS.
+# Trailing colon in INFOPATH appends the default info dirs to the search path.
 # Please do not submit PRs to remove it!
 # shellcheck disable=SC2154
 homebrew-shellenv() {
@@ -11,11 +12,20 @@ homebrew-shellenv() {
     return
   fi
 
-  if [[ -n "$1" ]]
+  # Use specified shell name parameter, if available.
+  HOMEBREW_SHELL_NAME="${1:-}"
+
+  # Use the parent process name, if possible.
+  # This is known to fail under some sandboxes.
+  if [[ -z "${HOMEBREW_SHELL_NAME}" ]]
   then
-    HOMEBREW_SHELL_NAME="$1"
-  else
-    HOMEBREW_SHELL_NAME="$(/bin/ps -p "${PPID}" -c -o comm=)"
+    HOMEBREW_SHELL_NAME="$(/bin/ps -p "${PPID}" -c -o comm= 2>/dev/null)"
+  fi
+
+  # Fall back to the (login) shell name from the environment.
+  if [[ -z "${HOMEBREW_SHELL_NAME}" ]]
+  then
+    HOMEBREW_SHELL_NAME="${SHELL##*/}"
   fi
 
   if [[ -n "${HOMEBREW_MACOS}" ]] &&
@@ -42,7 +52,7 @@ homebrew-shellenv() {
       echo "set --global --export HOMEBREW_REPOSITORY \"${HOMEBREW_REPOSITORY}\";"
       echo "fish_add_path --global --move --path \"${HOMEBREW_PREFIX}/bin\" \"${HOMEBREW_PREFIX}/sbin\";"
       echo "if test -n \"\$MANPATH[1]\"; set --global --export MANPATH '' \$MANPATH; end;"
-      echo "if not contains \"${HOMEBREW_PREFIX}/share/info\" \$INFOPATH; set --global --export INFOPATH \"${HOMEBREW_PREFIX}/share/info\" \$INFOPATH; end;"
+      echo "if not set --query INFOPATH; set INFOPATH ''; end; if not contains \"${HOMEBREW_PREFIX}/share/info\" \$INFOPATH; set --global --export INFOPATH \"${HOMEBREW_PREFIX}/share/info\" \$INFOPATH; end;"
       ;;
     csh | -csh | tcsh | -tcsh)
       echo "setenv HOMEBREW_PREFIX ${HOMEBREW_PREFIX};"
@@ -50,7 +60,7 @@ homebrew-shellenv() {
       echo "setenv HOMEBREW_REPOSITORY ${HOMEBREW_REPOSITORY};"
       if [[ -n "${PATH_HELPER_ROOT}" ]]
       then
-        PATH_HELPER_ROOT="${PATH_HELPER_ROOT}" PATH="${HOMEBREW_PATH}" /usr/libexec/path_helper -c
+        echo "eval \`/usr/bin/env PATH_HELPER_ROOT=\"${PATH_HELPER_ROOT}\" /usr/libexec/path_helper -c\`;"
       else
         echo "setenv PATH ${HOMEBREW_PREFIX}/bin:${HOMEBREW_PREFIX}/sbin:\$PATH;"
       fi
@@ -72,10 +82,11 @@ homebrew-shellenv() {
       if [[ "${HOMEBREW_SHELL_NAME}" == "zsh" ]] || [[ "${HOMEBREW_SHELL_NAME}" == "-zsh" ]]
       then
         echo "fpath[1,0]=\"${HOMEBREW_PREFIX}/share/zsh/site-functions\";"
+        echo "export FPATH;"
       fi
       if [[ -n "${PATH_HELPER_ROOT}" ]]
       then
-        PATH_HELPER_ROOT="${PATH_HELPER_ROOT}" PATH="${HOMEBREW_PATH}" /usr/libexec/path_helper -s
+        echo "eval \"\$(/usr/bin/env PATH_HELPER_ROOT=\"${PATH_HELPER_ROOT}\" /usr/libexec/path_helper -s)\""
       else
         echo "export PATH=\"${HOMEBREW_PREFIX}/bin:${HOMEBREW_PREFIX}/sbin\${PATH+:\$PATH}\";"
       fi

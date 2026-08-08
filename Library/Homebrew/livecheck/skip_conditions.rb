@@ -120,6 +120,7 @@ module Homebrew
       }
       private_class_method def self.cask_deprecated(cask, livecheck_defined, full_name: false, verbose: false)
         return {} if !cask.deprecated? || livecheck_defined
+        return {} if cask.disable_date && cask.deprecation_reason == :fails_gatekeeper_check
 
         Livecheck.status_hash(cask, "deprecated", full_name:, verbose:)
       end
@@ -194,30 +195,30 @@ module Homebrew
       end
 
       # Skip conditions for formulae.
-      FORMULA_CHECKS = T.let([
+      FORMULA_CHECKS = [
         :package_or_resource_skip,
         :formula_head_only,
-        :formula_deprecated,
         :formula_disabled,
+        :formula_deprecated,
         :formula_versioned,
-      ].freeze, T::Array[Symbol])
+      ].freeze
       private_constant :FORMULA_CHECKS
 
       # Skip conditions for casks.
-      CASK_CHECKS = T.let([
+      CASK_CHECKS = [
         :package_or_resource_skip,
-        :cask_deprecated,
         :cask_disabled,
+        :cask_deprecated,
         :cask_extract_plist,
         :cask_version_latest,
         :cask_url_unversioned,
-      ].freeze, T::Array[Symbol])
+      ].freeze
       private_constant :CASK_CHECKS
 
       # Skip conditions for resources.
-      RESOURCE_CHECKS = T.let([
+      RESOURCE_CHECKS = [
         :package_or_resource_skip,
-      ].freeze, T::Array[Symbol])
+      ].freeze
       private_constant :RESOURCE_CHECKS
 
       # If a formula/cask/resource should be skipped, we return a hash from
@@ -282,7 +283,7 @@ module Homebrew
           verbose:,
           extract_plist:,
         )
-        return if skip_info.blank?
+        return if skip_info.empty?
 
         referenced_name = Livecheck.package_or_resource_name(livecheck_package_or_resource, full_name:)
         referenced_type = case livecheck_package_or_resource
@@ -323,12 +324,12 @@ module Homebrew
         end
         return unless name
 
-        if skip_hash[:messages].is_a?(Array) && skip_hash[:messages].count.positive?
-          # TODO: Handle multiple messages, only if needed in the future
+        if skip_hash[:messages].is_a?(Array) && skip_hash[:messages].any?
+          messages = skip_hash[:messages].join("; ")
           if skip_hash[:status] == "skipped"
-            puts "#{Tty.red}#{name}#{Tty.reset}: skipped - #{skip_hash[:messages][0]}"
+            puts "#{Tty.red}#{name}#{Tty.reset}: skipped - #{messages}"
           else
-            puts "#{Tty.red}#{name}#{Tty.reset}: #{skip_hash[:messages][0]}"
+            puts "#{Tty.red}#{name}#{Tty.reset}: #{messages}"
           end
         elsif skip_hash[:status].present?
           puts "#{Tty.red}#{name}#{Tty.reset}: #{skip_hash[:status]}"

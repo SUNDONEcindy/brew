@@ -23,7 +23,7 @@ module Homebrew
                description: "For every library that a keg references, print its dylib path followed by the " \
                             "binaries that link to it."
         switch "--cached",
-               description: "Print the cached linkage values stored in `HOMEBREW_CACHE`, set by a previous " \
+               description: "Print the cached linkage values stored in `$HOMEBREW_CACHE`, set by a previous " \
                             "`brew linkage` run."
 
         named_args :installed_formula
@@ -40,7 +40,11 @@ module Homebrew
           kegs.each do |keg|
             ohai "Checking #{keg.name} linkage" if kegs.size > 1
 
-            result = LinkageChecker.new(keg, cache_db: db)
+            result = LinkageChecker.new(keg,
+                                        cache_db: T.cast(db,
+                                                         CacheStoreDatabase[String,
+                                                                            T::Hash[T.any(String, Symbol),
+                                                                                    T.anything]]))
 
             if args.test?
               result.display_test_output(strict: args.strict?)

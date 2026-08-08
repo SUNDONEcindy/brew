@@ -37,6 +37,7 @@ module Homebrew
         require "formula_free_port"
         require "utils/fork"
 
+        optional_prefix_var_dirs = %w[var/cache var/log var/run]
         args.named.to_resolved_formulae.each do |f|
           # Cannot test uninstalled formulae
           unless f.latest_version_installed?
@@ -58,10 +59,10 @@ module Homebrew
 
           # Don't test formulae missing test dependencies
           missing_test_deps = f.recursive_dependencies do |dependent, dependency|
-            Dependency.prune if dependency.installed?
+            next Dependable::PRUNE if dependency.installed?
             next if dependency.test? && dependent == f
 
-            Dependency.prune unless dependency.required?
+            next Dependable::PRUNE unless dependency.required?
           end.map(&:to_s)
           unless missing_test_deps.empty?
             ofail "#{f.full_name} is missing test dependencies: #{missing_test_deps.join(" ")}"
@@ -81,23 +82,22 @@ module Homebrew
 
             exec_args << "--HEAD" if f.head?
 
-            if Sandbox.available?
-              sandbox = Sandbox.new
+            Sandbox.run_or_fork(
+              *exec_args,
+              step:                 "testing #{f.full_name}",
+              warn_without_sandbox: false,
+            ) do |sandbox|
               f.logs.mkpath
               sandbox.record_log(f.logs/"test.sandbox.log")
               sandbox.allow_write_temp_and_cache
               sandbox.allow_write_log(f)
               sandbox.allow_write_xcode
-              sandbox.allow_write_path(HOMEBREW_PREFIX/"var/cache")
               sandbox.allow_write_path(HOMEBREW_PREFIX/"var/homebrew/locks")
-              sandbox.allow_write_path(HOMEBREW_PREFIX/"var/log")
-              sandbox.allow_write_path(HOMEBREW_PREFIX/"var/run")
-              sandbox.deny_all_network unless f.class.network_access_allowed?(:test)
-              sandbox.run(*exec_args)
-            else
-              Utils.safe_fork do
-                exec(*exec_args)
+              sandbox.deny_read_home
+              optional_prefix_var_dirs.each do |dir|
+                sandbox.allow_write_path_if_exists HOMEBREW_PREFIX/dir
               end
+              sandbox.deny_all_network unless f.class.network_access_allowed?(:test)
             end
           # Rescue any possible exception types.
           rescue Exception => e # rubocop:disable Lint/RescueException

@@ -1,77 +1,52 @@
-# typed: true # rubocop:todo Sorbet/StrictSigil
+# typed: strict
 # frozen_string_literal: true
 
 require "development_tools"
 require "cask/exceptions"
 require "system_command"
+require "utils/output"
 
 module Cask
   # Helper module for quarantining files.
   module Quarantine
     extend SystemCommand::Mixin
+    extend ::Utils::Output::Mixin
+
+    class SigningIdentity < T::Struct
+      const :requirement, String
+    end
 
     QUARANTINE_ATTRIBUTE = "com.apple.quarantine"
+    # https://github.com/apple-oss-distributions/WebKit/blob/WebKit-7618.2.12.11.6/Source/WebCore/PAL/pal/spi/mac/QuarantineSPI.h#L40-L45
+    USER_APPROVED_FLAG = 0x0040
 
-    QUARANTINE_SCRIPT = (HOMEBREW_LIBRARY_PATH/"cask/utils/quarantine.swift").freeze
-    COPY_XATTRS_SCRIPT = (HOMEBREW_LIBRARY_PATH/"cask/utils/copy-xattrs.swift").freeze
-
-    def self.swift
-      @swift ||= begin
-        # /usr/bin/swift (which runs via xcrun) adds `/usr/local/include` to the top of the include path,
-        # which allows really broken local setups to break our Swift usage here. Using the underlying
-        # Swift executable directly however (returned by `xcrun -find`) avoids this CPATH mess.
-        xcrun_swift = ::Utils.popen_read("/usr/bin/xcrun", "-find", "swift", err: :close).chomp
-        if $CHILD_STATUS.success? && File.executable?(xcrun_swift)
-          xcrun_swift
-        else
-          DevelopmentTools.locate("swift")
-        end
-      end
-    end
-    private_class_method :swift
-
+    sig { returns(T.nilable(Pathname)) }
     def self.xattr
-      @xattr ||= DevelopmentTools.locate("xattr")
+      @xattr ||= T.let(DevelopmentTools.locate("xattr"), T.nilable(Pathname))
     end
     private_class_method :xattr
 
-    def self.swift_target_args
-      ["-target", "#{Hardware::CPU.arch}-apple-macosx#{MacOS.version}"]
-    end
-    private_class_method :swift_target_args
+    sig { returns(T::Boolean) }
+    def self.xattr_available?
+      xattr = self.xattr
+      return false if xattr.nil?
 
-    sig { returns(Symbol) }
+      system_command(xattr, args: ["-h"], print_stderr: false).success?
+    end
+
+    sig { returns([Symbol, T.nilable(String)]) }
     def self.check_quarantine_support
-      odebug "Checking quarantine support"
-
-      if xattr.nil? || !system_command(xattr, args: ["-h"], print_stderr: false).success?
-        odebug "There's no working version of `xattr` on this system."
-        :xattr_broken
-      elsif swift.nil?
-        odebug "Swift is not available on this system."
-        :no_swift
-      else
-        api_check = system_command(swift,
-                                   args:         [*swift_target_args, QUARANTINE_SCRIPT],
-                                   print_stderr: false)
-
-        case api_check.exit_status
-        when 2
-          odebug "Quarantine is available."
-          :quarantine_available
-        else
-          odebug "Unknown support status"
-          :unknown
-        end
-      end
+      [:quarantine_unavailable, nil]
     end
 
+    sig { returns(T::Boolean) }
     def self.available?
-      @status ||= check_quarantine_support
+      @quarantine_support ||= T.let(check_quarantine_support, T.nilable([Symbol, T.nilable(String)]))
 
-      @status == :quarantine_available
+      @quarantine_support[0] == :quarantine_available
     end
 
+    sig { params(file: T.nilable(T.any(String, Pathname))).returns(T.nilable(T::Boolean)) }
     def self.detect(file)
       return if file.nil?
 
@@ -84,12 +59,64 @@ module Cask
       quarantine_status
     end
 
+    sig { params(file: T.any(String, Pathname)).returns(String) }
     def self.status(file)
+      xattr = self.xattr
+      raise "unexpected nil xattr" if xattr.nil?
+
       system_command(xattr,
                      args:         ["-p", QUARANTINE_ATTRIBUTE, file],
                      print_stderr: false).stdout.rstrip
     end
 
+    sig { params(file: T.any(String, Pathname)).returns(T::Boolean) }
+    def self.user_approved?(file)
+      return false if xattr.nil?
+
+      quarantine_status = status(file)
+      return false if quarantine_status.empty?
+
+      quarantine_status.split(";").fetch(0).to_i(16).anybits?(USER_APPROVED_FLAG)
+    end
+
+    sig { params(download_path: T.nilable(Pathname)).void }
+    def self.inherit_user_approval!(download_path: nil)
+      return if !download_path || !detect(download_path)
+
+      # Preserve quarantine provenance so Gatekeeper still checks the upgraded app while carrying forward
+      # the user's approval only after the upgrade path verifies that its signing identity is unchanged.
+      # https://developer.apple.com/forums/thread/706442
+      odebug "Inheriting user approval for #{download_path}"
+
+      xattr = self.xattr
+      raise "unexpected nil xattr" if xattr.nil?
+
+      quarantiner = system_command(xattr,
+                                   args:         [
+                                     "-w",
+                                     QUARANTINE_ATTRIBUTE,
+                                     status(download_path).sub(/\A[0-9a-f]+/i) do |flags|
+                                       (flags.to_i(16) | USER_APPROVED_FLAG).to_s(16).rjust(flags.length, "0")
+                                     end,
+                                     download_path,
+                                   ],
+                                   print_stderr: false)
+
+      return if quarantiner.success?
+
+      raise CaskQuarantineReleaseError.new(download_path, quarantiner.stderr)
+    end
+
+    sig { params(_file: T.any(String, Pathname)).returns(T.nilable(SigningIdentity)) }
+    def self.signing_identity(_file); end
+
+    sig {
+      params(_file: T.any(String, Pathname), _identity: SigningIdentity)
+        .returns(T.nilable(T::Boolean))
+    }
+    def self.signing_identity_match(_file, _identity); end
+
+    sig { params(attribute: String).returns(String) }
     def self.toggle_no_translocation_bit(attribute)
       fields = attribute.split(";")
 
@@ -97,15 +124,20 @@ module Cask
       # Let's toggle the app translocation bit, bit 8
       # http://www.openradar.me/radar?id=5022734169931776
 
-      fields[0] = (fields[0].to_i(16) | 0x0100).to_s(16).rjust(4, "0")
+      fields[0] = (fields.fetch(0).to_i(16) | 0x0100).to_s(16).rjust(4, "0")
 
       fields.join(";")
     end
 
+    # Fully remove quarantine only when explicitly requested; upgrades preserve it and inherit approval above.
+    sig { params(download_path: T.nilable(Pathname)).void }
     def self.release!(download_path: nil)
-      return unless detect(download_path)
+      return if !download_path || !detect(download_path)
 
       odebug "Releasing #{download_path} from quarantine"
+
+      xattr = self.xattr
+      raise "unexpected nil xattr" if xattr.nil?
 
       quarantiner = system_command(xattr,
                                    args:         [
@@ -120,33 +152,12 @@ module Cask
       raise CaskQuarantineReleaseError.new(download_path, quarantiner.stderr)
     end
 
+    sig { params(cask: T.nilable(Cask), download_path: T.nilable(Pathname), action: T::Boolean).void }
     def self.cask!(cask: nil, download_path: nil, action: true)
-      return if cask.nil? || download_path.nil?
-
-      return if detect(download_path)
-
-      odebug "Quarantining #{download_path}"
-
-      quarantiner = system_command(swift,
-                                   args:         [
-                                     *swift_target_args,
-                                     QUARANTINE_SCRIPT,
-                                     download_path,
-                                     cask.url.to_s,
-                                     cask.homepage.to_s,
-                                   ],
-                                   print_stderr: false)
-
-      return if quarantiner.success?
-
-      case quarantiner.exit_status
-      when 2
-        raise CaskQuarantineError.new(download_path, "Insufficient parameters")
-      else
-        raise CaskQuarantineError.new(download_path, quarantiner.stderr)
-      end
+      raise NotImplementedError
     end
 
+    sig { params(from: T.nilable(Pathname), to: T.nilable(Pathname)).void }
     def self.propagate(from: nil, to: nil)
       return if from.nil? || to.nil?
 
@@ -162,11 +173,14 @@ module Cask
                       args:  [
                         "-0",
                         "--",
-                        "/bin/chmod",
+                        "chmod",
                         "-h",
                         "u+w",
                       ],
                       input: resolved_paths.join("\0"))
+
+      xattr = self.xattr
+      raise "unexpected nil xattr" if xattr.nil?
 
       quarantiner = system_command("/usr/bin/xargs",
                                    args:         [
@@ -187,18 +201,7 @@ module Cask
 
     sig { params(from: Pathname, to: Pathname, command: T.class_of(SystemCommand)).void }
     def self.copy_xattrs(from, to, command:)
-      odebug "Copying xattrs from #{from} to #{to}"
-
-      command.run!(
-        swift,
-        args: [
-          *swift_target_args,
-          COPY_XATTRS_SCRIPT,
-          from,
-          to,
-        ],
-        sudo: !to.writable?,
-      )
+      raise NotImplementedError
     end
 
     # Ensures that Homebrew has permission to update apps on macOS Ventura.

@@ -9,6 +9,9 @@ class Formula
   sig { params(args: T.untyped, block: T.untyped).returns(T.untyped) }
   def allow_network_access!(*args, &block); end
 
+  sig { params(args: T.untyped, block: T.untyped).returns(T.untyped) }
+  def api_source(*args, &block); end
+
   sig { params(args: T.untyped, block: T.untyped).returns(T::Boolean) }
   def autobump?(*args, &block); end
 
@@ -39,6 +42,9 @@ class Formula
   sig { params(args: T.untyped, block: T.untyped).returns(T.untyped) }
   def deny_network_access!(*args, &block); end
 
+  sig { params(args: T.untyped, block: T.untyped).returns(T.untyped) }
+  def deprecate_args(*args, &block); end
+
   sig { params(args: T.untyped, block: T.untyped).returns(T::Boolean) }
   def deprecated?(*args, &block); end
 
@@ -67,6 +73,9 @@ class Formula
   def desc(*args, &block); end
 
   sig { params(args: T.untyped, block: T.untyped).returns(T.untyped) }
+  def disable_args(*args, &block); end
+
+  sig { params(args: T.untyped, block: T.untyped).returns(T.untyped) }
   def disable_date(*args, &block); end
 
   sig { params(args: T.untyped, block: T.untyped).returns(T.untyped) }
@@ -91,6 +100,9 @@ class Formula
   def homepage(*args, &block); end
 
   sig { params(args: T.untyped, block: T.untyped).returns(T.untyped) }
+  def homepage_browsed(*args, &block); end
+
+  sig { params(args: T.untyped, block: T.untyped).returns(T.untyped) }
   def keg_only_reason(*args, &block); end
 
   sig { params(args: T.untyped, block: T.untyped).returns(T.untyped) }
@@ -109,13 +121,13 @@ class Formula
   def loaded_from_api?(*args, &block); end
 
   sig { params(args: T.untyped, block: T.untyped).returns(T::Boolean) }
+  def loaded_from_internal_api?(*args, &block); end
+
+  sig { params(args: T.untyped, block: T.untyped).returns(T::Boolean) }
   def network_access_allowed?(*args, &block); end
 
   sig { params(args: T.untyped, block: T.untyped).returns(T.untyped) }
   def no_autobump!(*args, &block); end
-
-  sig { params(args: T.untyped, block: T.untyped).returns(T::Boolean) }
-  def no_autobump_defined?(*args, &block); end
 
   sig { params(args: T.untyped, block: T.untyped).returns(T.untyped) }
   def no_autobump_message(*args, &block); end
@@ -140,6 +152,9 @@ class Formula
 
   sig { params(args: T.untyped, block: T.untyped).returns(T.untyped) }
   def pinned_version(*args, &block); end
+
+  sig { params(args: T.untyped, block: T.untyped).returns(T.untyped) }
+  def post_install_steps(*args, &block); end
 
   sig { params(args: T.untyped, block: T.untyped).returns(T.untyped) }
   def pour_bottle_check_unsatisfied_reason(*args, &block); end
